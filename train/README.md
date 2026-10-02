@@ -36,6 +36,33 @@ this track (see `src/encoder_client.py`). For production traffic,
 replace the template-augmented dataset with real labeled queries —
 that's where most of the accuracy comes from, not the architecture.
 
+### Downloading the base model separately (corporate networks)
+
+`finetune.py` downloads `answerdotai/ModernBERT-base` (~600MB) on first
+run via `from_pretrained`. If that download fails — e.g. SSL
+certificate errors behind a corporate TLS-inspecting proxy — fetch it
+with the Hugging Face CLI and train offline:
+
+```bash
+pip install -U huggingface_hub   # provides the `hf` CLI
+
+# if the download fails with certificate errors, point Python at your
+# company's root CA first (get the .pem from IT or export it from
+# Keychain Access on macOS):
+# export SSL_CERT_FILE=/path/to/company-root-ca.pem
+# export REQUESTS_CA_BUNDLE=/path/to/company-root-ca.pem
+
+hf download answerdotai/ModernBERT-base
+
+HF_HUB_OFFLINE=1 python train/finetune.py \
+  --data train/dataset.jsonl --out models/intent-encoder
+```
+
+`HF_HUB_OFFLINE=1` forces `from_pretrained` to resolve from the local
+cache (`~/.cache/huggingface`, override with `HF_HOME`) and never touch
+the network. The dataset build step (`build_dataset.py`) needs no
+network at all.
+
 ## Track B — Fine-tune Laya itself (RLCD)
 
 Laya's own fine-tuning flow trains the actual decision heads (choice /
