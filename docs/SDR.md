@@ -163,7 +163,30 @@ scaling directly address.
 6. Monitor: path distribution, guardrail band histogram, System 2 rate
    (= the only remaining variable cost), p99 per path.
 
-## 9. Open questions
+## 10. Live verification (2026-10-02, this POC)
+
+Ran the real `convaiinnovations/laya-typed-decisions` checkpoint via
+`pip install laya` + `laya.load(...)` on CPU. Findings:
+
+- **Wire shape confirmed**: `agent.predict(text, questions)` returns
+  `result["answers"][<id>]` with `choice`/`confidence` (Choice),
+  `noul` (Noul), and `score` + per-level `probabilities` (Score) —
+  exactly what `src/laya_client.py::parse_decision` expects.
+- **Latency on CPU**: 3.8–11 s per 4-question decision (cold/warm),
+  not the vendor's 25–45 ms (GPU figure). Plan serving hardware
+  accordingly; GPU or ONNX is recommended for production.
+- **Calibration warning is real**: the checkpoint logs
+  "ships invalid temperatures... Treat confidence from the affected
+  entries as uncalibrated", and observed Choice confidences were low
+  (0.016–0.235) even when the choice was right. **Do not trust the
+  default thresholds** — fit temperatures / tune gates on your labeled
+  data before production (Track A does this explicitly).
+- **Zero-shot quality gap is real**: "please delete my account now"
+  → `technical_support` (wrong), guardrail 1.83 (medium, not
+  critical). Fine-tuning on your decisions is not optional for
+  production quality — see train/README.md.
+
+## 11. Open questions
 
 - OQ1. Laya Score-head calibration on our adversarial set — measure
   before trusting the 3.0 block threshold.

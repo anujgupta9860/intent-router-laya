@@ -5,7 +5,7 @@ dependency**: System 1 is a self-hosted **Laya** open-weights decision
 model (Apache-2.0), and you can **train your own** classifier and serve
 it the same way.
 
-- **System 1 — Laya** (self-hosted, ~25–45 ms): one `predict` call
+- **System 1 — Laya** (self-hosted, ~25–45 ms on GPU; ~4–11 s on CPU — see SDR §10): one `predict` call
   returns the intent (Choice), human-review probability (Noul),
   utterance type (Choice), and a **Score-based guardrail risk**
   (0=safe … 4=critical). Your hardware, your data, $0 marginal cost.
