@@ -19,8 +19,8 @@ Usage:
     python train/finetune.py --data train/dataset.jsonl --out models/intent-encoder
     SYSTEM1_BACKEND=encoder LAYA_CHECKPOINT=models/intent-encoder uvicorn src.app:app
 
-Requirements: torch, transformers, scikit-learn
-    pip install torch transformers scikit-learn
+Requirements: torch, transformers, scikit-learn, accelerate, pyyaml
+    pip install torch transformers scikit-learn accelerate pyyaml
 A CPU can train this (small data, small model); a GPU is faster.
 """
 from __future__ import annotations

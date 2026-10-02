@@ -12,7 +12,8 @@ internals needed.
 
 ```bash
 # 1. install training deps (CPU ok; GPU faster)
-pip install torch transformers scikit-learn
+#    accelerate is required by HF Trainer; pyyaml by build_dataset.py
+pip install torch transformers scikit-learn accelerate pyyaml
 
 # 2. build the labeled dataset from data/intents.yaml
 python train/build_dataset.py --out train/dataset.jsonl --repeat 8
