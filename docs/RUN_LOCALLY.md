@@ -63,11 +63,18 @@ pip install laya
 
 ### 2. Download the checkpoint (once)
 
-`laya.load()` auto-downloads on first run, but it's nicer to get the
-~1.6GB out of the way up front:
+First install the Hugging Face CLI (it also comes bundled with `laya`,
+but this is the standalone way):
 
 ```bash
-# the `hf` CLI ships with the huggingface_hub package (installed with laya)
+pip install -U huggingface_hub
+hf --version   # sanity check
+```
+
+`laya.load()` auto-downloads on first run, but it's nicer to get the
+~1.6GB out of the way up front. With the CLI installed:
+
+```bash
 hf download convaiinnovations/laya-typed-decisions
 # downloads to ~/.cache/huggingface — override with HF_HOME if you
 # want the weights somewhere else:
