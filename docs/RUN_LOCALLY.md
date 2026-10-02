@@ -61,7 +61,32 @@ pip install --index-url https://download.pytorch.org/whl/cpu torch
 pip install laya
 ```
 
-### 2. Run with the Laya backend
+### 2. Download the checkpoint (once)
+
+`laya.load()` auto-downloads on first run, but it's nicer to get the
+~1.6GB out of the way up front:
+
+```bash
+# the `hf` CLI ships with the huggingface_hub package (installed with laya)
+hf download convaiinnovations/laya-typed-decisions
+# downloads to ~/.cache/huggingface — override with HF_HOME if you
+# want the weights somewhere else:
+#   HF_HOME=/data/hf-cache hf download convaiinnovations/laya-typed-decisions
+```
+
+Expect ~6 minutes on a decent connection. Afterwards the weights are
+cached and startup is just model load.
+
+If your network needs a proxy and the download fails with
+`httpx.InvalidURL: Invalid port`, the sandbox-style `NO_PROXY` with
+bracketed IPv6 entries breaks older httpx — strip it for the download:
+
+```bash
+NO_PROXY=localhost,127.0.0.1 no_proxy=localhost,127.0.0.1 \
+  hf download convaiinnovations/laya-typed-decisions
+```
+
+### 3. Run with the Laya backend
 
 ```bash
 SYSTEM1_BACKEND=laya uvicorn src.app:app --port 8080
