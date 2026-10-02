@@ -55,7 +55,8 @@ pytest eval/ -q        # 25 tests, no network, no weights
 ### 1. Install Laya (once)
 
 ```bash
-# CPU torch first (much smaller download than the CUDA build)
+# CPU torch first: the default CUDA wheel is ~2.5GB and unnecessary
+# for a 421M decision model. Install in this order!
 pip install --index-url https://download.pytorch.org/whl/cpu torch
 pip install laya
 ```
@@ -65,12 +66,25 @@ pip install laya
 ```bash
 SYSTEM1_BACKEND=laya uvicorn src.app:app --port 8080
 # checkpoint defaults to convaiinnovations/laya-typed-decisions
-# (~1.6GB downloads from Hugging Face on first run, then cached)
 ```
 
+What to expect on first run (measured):
+- **Checkpoint download**: ~1.6GB from Hugging Face, ~6 minutes on a
+  decent connection. Cached in `~/.cache/huggingface` afterwards
+  (override with `HF_HOME`).
+- **Model load**: part of the ~6 minutes above; `LAYA_PRELOAD=true`
+  (default) loads at startup so the first request isn't the slow one.
+- **Per-decision latency**: ~25–45 ms on GPU, **~4–11 s on CPU**.
+  For anything beyond experimentation, use a GPU or the ONNX build.
+
 The four curl commands from Option A now run against the real model.
-Watch the logs: `Laya checkpoint loaded in Xs`, then per-decision
-latency (~25–45 ms).
+Watch the logs for `Laya checkpoint loaded in Xs`.
+
+> **Calibration note (observed)**: the checkpoint logs
+> "treat confidence from the affected entries as uncalibrated", and
+> measured Choice confidences were 0.016–0.235 even when the choice
+> was right. Tune the gate thresholds on your labeled data before
+> trusting them — see `train/README.md`.
 
 Other checkpoints:
 
@@ -140,8 +154,17 @@ SYSTEM1_BACKEND=laya docker compose up --build
 - **`ModuleNotFoundError: src`** — run from the repo root.
 - **`pip install laya` fails with "No space left"** — install CPU
   torch first (see Option B); the default CUDA torch is ~2.5GB.
+  Also make sure your venv isn't on a tiny tmpfs mount.
+- **Hugging Face download fails with `httpx.InvalidURL: Invalid port`**
+  — some sandboxes export `NO_PROXY` with bracketed IPv6 entries
+  (`[::1]`) that older httpx can't parse. Workaround for the download:
+  ```bash
+  NO_PROXY=localhost,127.0.0.1 no_proxy=localhost,127.0.0.1 \
+    SYSTEM1_BACKEND=laya uvicorn src.app:app --port 8080
+  ```
 - **First Laya decision is slow** — checkpoint download + cold model;
   `LAYA_PRELOAD=true` (default) loads at startup; `warmup()` runs once.
+  On CPU expect seconds per decision; that's normal, not a bug.
 - **OOM on small machines** — use `laya-multilingual` (322M) or the
   encoder track (smaller still).
 - **Port 8080 in use** — change `--port`.
