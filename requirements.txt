@@ -1,0 +1,11 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pyyaml>=6.0
+pydantic>=2.7
+httpx>=0.27
+# Optional (import-guarded; install what you use):
+# laya>=0.3             # SYSTEM1_BACKEND=laya (self-hosted System 1)
+# torch                 # CPU build recommended: pip install --index-url https://download.pytorch.org/whl/cpu torch
+a2a-sdk>=0.2          # real A2A dispatch (stub otherwise)
+# google-cloud-aiplatform  # SYSTEM2_BACKEND=vertex (Gemma on Vertex AI)
+pytest>=8.0           # eval/test_laya_hybrid.py

@@ -1,0 +1,33 @@
+# Example values for a real GKE deployment.
+# Copy to values-prod.yaml, fill in, and pass with -f. Keep secrets out of git.
+replicaCount: 2
+
+image:
+  repository: us-central1-docker.pkg.dev/my-gcp-project/intent-router-laya/intent-router-laya
+  tag: "v0.1.0"
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 8080
+
+config:
+  system1Backend: "laya"
+  system2Backend: "ollama"
+  gemmaModel: "gemma-3-4b-it"
+  confidenceThreshold: 0.6
+  humanReviewThreshold: 0.5
+  guardrailReviewScore: 1.5   # >= -> System 2 review (rubric 0=safe..4=critical)
+  guardrailBlockScore: 3.0    # >= -> hard block to fallback worker
+  logLevel: "INFO"
+
+secrets:
+  create: false   # use kubectl-created secret or External Secrets
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 2Gi

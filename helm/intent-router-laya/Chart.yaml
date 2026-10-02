@@ -1,0 +1,6 @@
+apiVersion: v2
+name: intent-router-laya
+description: Small-LLM intent classifier that routes user queries to worker agents over A2A
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

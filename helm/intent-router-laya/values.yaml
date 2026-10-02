@@ -1,0 +1,61 @@
+# Default values for intent-router-laya.
+# This is a starting point for local/dev; copy to your own values file
+# (or use values-example.yaml) for GKE.
+
+replicaCount: 1
+
+image:
+  repository: intent-router-laya
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+# Non-secret configuration -> rendered into a ConfigMap.
+config:
+  system1Backend: "mock"        # mock | laya | encoder
+  system2Backend: "mock"        # mock | ollama | vertex
+  gemmaModel: "gemma-3-4b-it"
+  ollamaUrl: "http://ollama:11434"
+  layaCheckpoint: "convaiinnovations/laya-typed-decisions"
+  layaPreload: "true"
+  confidenceThreshold: 0.6
+  humanReviewThreshold: 0.5
+  guardrailReviewScore: 1.5   # >= -> System 2 review (rubric 0=safe..4=critical)
+  guardrailBlockScore: 3.0    # >= -> hard block to fallback worker
+  logLevel: "INFO"
+  # intent -> worker agent A2A base URL. "fallback" is required.
+  workerAgents:
+    billing_inquiry: "http://billing-worker:8001"
+    technical_support: "http://billing-worker:8001"
+    sales_question: "http://billing-worker:8001"
+    account_update: "http://order-worker:8002"
+    order_status: "http://order-worker:8002"
+    fallback: "http://order-worker:8002"
+
+# Secret configuration -> rendered into a Secret. Prefer kubectl-created
+# secrets or External Secrets in production (see templates/NOTES.txt).
+secrets:
+  # No secrets required: Laya is self-hosted and needs no API key.
+  # Kept as a placeholder for future backends (e.g. a commercial System 2).
+  create: false
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

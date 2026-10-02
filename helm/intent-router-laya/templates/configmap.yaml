@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "intent-router-laya.fullname" . }}
+  labels:
+    {{- include "intent-router-laya.labels" . | nindent 4 }}
+data:
+  SYSTEM1_BACKEND: {{ .Values.config.system1Backend | quote }}
+  SYSTEM2_BACKEND: {{ .Values.config.system2Backend | quote }}
+  GEMMA_MODEL: {{ .Values.config.gemmaModel | quote }}
+  LAYA_CHECKPOINT: {{ .Values.config.layaCheckpoint | quote }}
+  LAYA_PRELOAD: {{ .Values.config.layaPreload | quote }}
+  OLLAMA_URL: {{ .Values.config.ollamaUrl | quote }}
+  CONFIDENCE_THRESHOLD: {{ .Values.config.confidenceThreshold | quote }}
+  HUMAN_REVIEW_THRESHOLD: {{ .Values.config.humanReviewThreshold | quote }}
+  GUARDRAIL_REVIEW_SCORE: {{ .Values.config.guardrailReviewScore | quote }}
+  GUARDRAIL_BLOCK_SCORE: {{ .Values.config.guardrailBlockScore | quote }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  WORKER_AGENTS_JSON: {{ .Values.config.workerAgents | toJson | quote }}

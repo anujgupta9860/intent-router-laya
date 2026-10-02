@@ -1,0 +1,28 @@
+The intent-router-laya release has been installed.
+
+Verify it:
+  kubectl get pods -l app.kubernetes.io/name={{ include "intent-router-laya.name" . }}
+  kubectl port-forward svc/{{ include "intent-router-laya.fullname" . }} 8080:8080
+  curl -X POST localhost:8080/route -H 'Content-Type: application/json' \
+    -d '{"text":"Where is my order?"}'
+
+Configuration:
+  * Non-secret settings (model, backend, thresholds, worker map) come from the
+    ConfigMap {{ include "intent-router-laya.fullname" . }}. Edit values under
+    `.Values.config` and run `helm upgrade`.
+  * Secrets (VERTEX_SERVICE_ACCOUNT_KEY, OLLAMA_URL) come from the Secret
+    {{ include "intent-router-laya.fullname" . }}. This chart only creates the Secret
+    when `.Values.secrets.create=true` AND no Secret already exists (lookup
+    guard), so upgrades never wipe values you set via kubectl.
+
+Production secret management (recommended over Helm-managed secrets):
+  1. Set `secrets.create=false` and create the Secret yourself:
+       kubectl create secret generic {{ include "intent-router-laya.fullname" . }} \
+         --from-literal=VERTEX_SERVICE_ACCOUNT_KEY="$(cat key.json)" \
+         --from-literal=OLLAMA_URL="http://ollama:11434"
+  2. Better: use Google Secret Manager + External Secrets Operator so the
+     Secret is synced from GSM and never lives in a values file or git.
+  3. Best for GCP: skip the key file entirely and use Workload Identity —
+     bind the pod's Kubernetes service account to a GCP service account with
+     Vertex AI permissions, and the Vertex SDK picks up credentials
+     automatically (ADC). Then VERTEX_SERVICE_ACCOUNT_KEY can stay empty.

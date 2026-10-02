@@ -1,0 +1,64 @@
+# Intent taxonomy for the intent-router POC.
+# Each intent maps to a worker key; the actual worker agent URL is resolved
+# from WORKER_AGENTS_JSON (env) at runtime, so retargeting a worker needs
+# no code change. Examples double as the labeled eval set (eval/eval.py)
+# and as few-shot anchors when the mock backend is swapped for Gemma.
+intents:
+  - name: billing_inquiry
+    description: Questions about bills, invoices, charges, payments, refunds, or receipts.
+    worker: billing
+    examples:
+      - "Why was I charged twice on my last invoice?"
+      - "I need a refund for the payment I made yesterday"
+      - "My bill seems higher than usual this month"
+      - "Can you send me a receipt for my last payment?"
+      - "I was overcharged on my invoice, please fix it"
+
+  - name: technical_support
+    description: Bug reports, errors, crashes, slowness, login or password problems.
+    worker: support
+    examples:
+      - "The app crashes every time I open the dashboard"
+      - "I'm getting an error when I try to log in"
+      - "The website is very slow today, pages won't load"
+      - "I found a bug in the export feature"
+      - "My password reset link is not working"
+
+  - name: sales_question
+    description: Pricing, plans, trials, demos, discounts, upgrades, or purchase questions.
+    worker: sales
+    examples:
+      - "What are your pricing plans for a team of 50?"
+      - "Can I get a demo of the enterprise features?"
+      - "Do you offer a discount for annual purchase?"
+      - "Is there a free trial available?"
+      - "I want to upgrade to the enterprise plan"
+
+  - name: account_update
+    description: Requests to change account details such as email, phone, address, or profile settings.
+    worker: account
+    examples:
+      - "I need to update my email address on the account"
+      - "How do I change my phone number in my profile?"
+      - "Please update my home address"
+      - "I want to change my username"
+      - "Where are the account settings for notifications?"
+
+  - name: order_status
+    description: Questions about order tracking, shipping, delivery, or package status.
+    worker: orders
+    examples:
+      - "Where is my order? It was supposed to arrive today"
+      - "Can you track my package for me?"
+      - "My order shows as shipped but nothing has arrived"
+      - "What is the delivery status of order #12345?"
+      - "The tracking page says delivered but I got nothing"
+
+  - name: fallback
+    description: Catch-all for queries that do not match any other intent or are out of scope.
+    worker: fallback
+    examples:
+      - "Tell me a joke"
+      - "What is the meaning of life?"
+      - "asdf qwer zxcv"
+      - "Hello"
