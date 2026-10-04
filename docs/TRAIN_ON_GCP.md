@@ -6,9 +6,11 @@ Two paths, pick one:
 - **Path A — Vertex AI Workbench + Laya's RLCD notebook.** Fine-tunes the
   actual Laya decision heads (`laya-typed-decisions`). This is the track
   that learns intent *and* the guardrail score head. Best accuracy.
-- **Path B — Compute Engine Deep Learning VM + our encoder track.**
+- **Path B — Compute Engine VM + our encoder track.**
   Fine-tunes a ModernBERT intent classifier (`train/finetune.py` from this
-  repo). Simpler, faster, intent-only (guardrail stays heuristic).
+  repo). Simpler, intent-only (guardrail stays heuristic). Runs on a plain
+  CPU VM — no GPU quota needed (verified 2026-10-03); a Deep Learning GPU
+  VM is faster if you have the quota.
 
 > **Screenshots:** this guide was written without access to your GCP
 > project, so every step lists exactly what to capture. Work through it
@@ -116,20 +118,26 @@ deleted).
 ## Path B — Compute Engine VM + encoder track
 
 Simpler path: trains our ModernBERT intent classifier with plain
-HF Trainer. Good for proving the serving path end to end.
+HF Trainer. Good for proving the serving path end to end. The CPU route
+below was verified end to end on 2026-10-03 (no GPU quota needed);
+the GPU column shows the faster alternative if your quota allows.
 
-### B1. Create the GPU VM
+### B1. Create the VM
 
 Console: **Compute Engine → VM instances → Create instance**
 
-| Field | Value |
-|---|---|
-| Name | `laya-encoder-train` |
-| Region / zone | `us-central1` / `us-central1-a` |
-| Machine type | `n1-standard-4` |
-| GPUs | *Add GPU* → **NVIDIA T4** × 1 (needs the quota from step 0) |
-| Boot disk | *Change* → search **Deep Learning** → pick the **PyTorch + CUDA**
-  image (torch/CUDA preinstalled, saves ~10 min) |
+| Field | CPU path (verified) | GPU alternative |
+|---|---|---|
+| Name | `laya-encoder-train` | same |
+| Region / zone | `us-central1` / `us-central1-a` | same |
+| Machine type | `e2-standard-4` (4 vCPU, 16 GB) | `n1-standard-4` |
+| GPUs | none | *Add GPU* → **NVIDIA T4** × 1 (needs the quota from step 0) |
+| Boot disk | Ubuntu 22.04 LTS, 50 GB balanced persistent disk | *Change* → search **Deep Learning** → **PyTorch + CUDA** image (torch/CUDA preinstalled, saves ~10 min) |
+
+If the VM will upload the finished model to Cloud Storage, set
+**Access scopes → Allow full access to all Cloud APIs** on the create
+form (or later via Stop → Edit → Start) — the default scopes are
+Storage read-only and the upload will fail without this.
 
 Click **Create**.
 
@@ -140,35 +148,70 @@ Click **Create**.
 Click **SSH** on the instance row (browser SSH), then:
 
 ```bash
+sudo apt-get update && sudo apt-get install -y python3-pip git
 git clone https://github.com/anujgupta9860/intent-router-laya.git
 cd intent-router-laya
+
+# CPU-only torch (far smaller download than the CUDA wheel)
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install transformers scikit-learn accelerate pyyaml "huggingface_hub[cli]"
-# torch + CUDA already on the Deep Learning image
+# Note: the stock Ubuntu 22.04 image ships pip 22.0.2, which does not know
+# --break-system-packages — plain `pip install` just works.
 
 # 1. build the labeled dataset from data/intents.yaml (no network needed)
-python train/build_dataset.py --out train/dataset.jsonl --repeat 8
+python3 train/build_dataset.py --out train/dataset.jsonl --repeat 8
+# -> wrote 232 records -> train/dataset.jsonl (6 intents)
 
-# 2. download the base model first (cleaner than in-script download)
+# 2. download the base model first (~3 GB; cleaner than in-script download)
 hf download answerdotai/ModernBERT-base
 
-# 3. train offline — 5 epochs, a few minutes on a T4
-HF_HUB_OFFLINE=1 python train/finetune.py \
-  --data train/dataset.jsonl --out models/intent-encoder
+# 3. train in the background — 5 epochs, minutes on CPU
+HF_HUB_OFFLINE=1 nohup python3 train/finetune.py \
+  --data train/dataset.jsonl --out models/intent-encoder > train.log 2>&1 &
+tail -f train.log
 ```
 
-You should see `val accuracy` and `fitted temperature` printed, and
-`models/intent-encoder/` containing weights, tokenizer, and
-`calibration.json`.
+You should see `val accuracy: 1.000 | mean confidence: 1.000`,
+`fitted temperature: 0.573`, and `exported -> models/intent-encoder`
+— `models/intent-encoder/` then holds the weights, tokenizer, and
+`calibration.json`. (Your numbers will differ on your data.)
 
-📸 *Screenshot: terminal showing `val accuracy: …` and the export line.*
+📸 *Screenshot: terminal showing `val accuracy` / `fitted temperature`.*
+
+Gotchas found the hard way:
+- `models/intent-encoder/checkpoints/` keeps every epoch's artifacts
+  (~8 GB) — it is not needed for inference. Delete it before a Docker
+  build or if the disk fills up.
+- If SSH-in-browser drops mid-session, the `nohup` training keeps
+  running — just reconnect and `tail train.log`.
 
 ### B3. Export to GCS and stop the VM
 
+From the same SSH session (the VM's service account authenticates;
+this is why step B1 widened the access scopes):
+
 ```bash
-gcloud storage cp -r models/intent-encoder gs://<your-bucket>/intent-encoder/
+pip install google-cloud-storage
+python3 - <<'EOF'
+from google.cloud import storage
+import os
+client = storage.Client(project="<your-project-id>")
+bucket = client.create_bucket("laya-checkpoints-<you>", location="us-central1")
+src = "models/intent-encoder"
+n = 0
+for root, _, files in os.walk(src):
+    for f in files:
+        p = os.path.join(root, f)
+        bucket.blob("intent-encoder/" + os.path.relpath(p, src)).upload_from_filename(p)
+        n += 1
+print(f"uploaded {n} files")
+EOF
 ```
 
-Then **Compute Engine → VM instances → select → Stop** (or Delete).
+(If the bucket name is taken, pick another suffix and retry.)
+
+Then **Compute Engine → VM instances → select → Stop** (or **Delete**
+— ends the VM and disk charges entirely).
 
 ---
 
