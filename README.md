@@ -102,6 +102,31 @@ don't download weights.
 guardrail thresholds), `/health` probes. No Secret required unless
 System 2 uses Vertex.
 
+### Live deployment (Innovation Lab, GCP)
+
+The fine-tuned encoder (`train/finetune.py` — ModernBERT, val accuracy
+1.000, fitted temperature 0.573) is deployed as `laya-encoder-router`
+on Cloud Run — public, no API key needed:
+
+```bash
+# health: which backend + checkpoint is resident
+curl -s https://laya-encoder-router-1031371624665.us-central1.run.app/health
+
+# route a query
+curl -s -X POST https://laya-encoder-router-1031371624665.us-central1.run.app/route \
+  -H 'content-type: application/json' \
+  -d '{"text": "Where is my order?"}' | python3 -m json.tool
+# -> intent: order_status, confidence: 0.914, path: fast, worker: worker-b
+
+# system 1 decision only (no routing)
+curl -s -X POST https://laya-encoder-router-1031371624665.us-central1.run.app/classify \
+  -H 'content-type: application/json' \
+  -d '{"text": "My bill seems too high this month"}' | python3 -m json.tool
+# -> system1_intent: billing_inquiry
+```
+
+Model checkpoint: `gs://laya-checkpoints-anuj/intent-encoder/`.
+
 ## Layout
 
 ```
