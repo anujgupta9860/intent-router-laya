@@ -127,6 +127,9 @@ curl -s -X POST https://laya-encoder-router-1031371624665.us-central1.run.app/cl
 
 Model checkpoint: `gs://laya-checkpoints-anuj/intent-encoder/`.
 
+Walkthrough video (2:40, narrated, all real console/terminal captures
+from the actual run): `docs/laya-poc-gcp-real-run.mp4`.
+
 ## Layout
 
 ```
