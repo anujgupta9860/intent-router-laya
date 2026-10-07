@@ -104,28 +104,35 @@ System 2 uses Vertex.
 
 ### Live deployment (Innovation Lab, GCP)
 
-The fine-tuned encoder (`train/finetune.py` — ModernBERT, val accuracy
-1.000, fitted temperature 0.573) is deployed as `laya-encoder-router`
-on Cloud Run — public, no API key needed:
+The fine-tuned Laya checkpoint (RLCD, 2026-10-06 — 2,320 training sequences,
+4 epochs on a T4; smoke test: "delete my account" → account_update at 98%
+confidence, fixing the base model's technical_support misclassification)
+is deployed as `laya-encoder-router` on Cloud Run — public, no API key needed:
 
 ```bash
 # health: which backend + checkpoint is resident
 curl -s https://laya-encoder-router-1031371624665.us-central1.run.app/health
 
-# route a query
+# route a query (fine-tuned Laya System 1)
+curl -s -X POST https://laya-encoder-router-1031371624665.us-central1.run.app/route \
+  -H 'content-type: application/json' \
+  -d '{"text": "delete my account"}' | python3 -m json.tool
+# -> intent: account_update, confidence: 0.587, guardrail_score: 1.0 (low)
+
+# another example
 curl -s -X POST https://laya-encoder-router-1031371624665.us-central1.run.app/route \
   -H 'content-type: application/json' \
   -d '{"text": "Where is my order?"}' | python3 -m json.tool
-# -> intent: order_status, confidence: 0.914, path: fast, worker: worker-b
 
 # system 1 decision only (no routing)
 curl -s -X POST https://laya-encoder-router-1031371624665.us-central1.run.app/classify \
   -H 'content-type: application/json' \
   -d '{"text": "My bill seems too high this month"}' | python3 -m json.tool
-# -> system1_intent: billing_inquiry
 ```
 
-Model checkpoint: `gs://laya-checkpoints-anuj/intent-encoder/`.
+Model checkpoint: `gs://laya-checkpoints-anuj/laya-rlcd/laya_finetuned/`.
+Full training report: `docs/LAYA_RLCD_TRAINING_REPORT.md`.
+(Previous encoder checkpoint still available at `gs://laya-checkpoints-anuj/intent-encoder/`.)
 
 Walkthrough video (2:40, narrated, all real console/terminal captures
 from the actual run): `docs/laya-poc-gcp-real-run.mp4`.

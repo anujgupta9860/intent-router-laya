@@ -1,0 +1,27 @@
+# Intent router serving the FINE-TUNED Laya checkpoint (RLCD, 2026-10-06).
+# Downloads the checkpoint from GCS at container startup, then serves.
+FROM python:3.12-slim
+
+WORKDIR /srv/app
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch \
+ && pip install --no-cache-dir -r requirements.txt \
+ && pip install --no-cache-dir laya google-cloud-storage
+
+COPY data/ ./data/
+COPY src/ ./src/
+COPY entrypoint_laya.py ./
+
+ENV LAYA_CHECKPOINT=/srv/app/checkpoints/laya_finetuned \
+    CHECKPOINT_GCS=gs://laya-checkpoints-anuj/laya-rlcd/laya_finetuned/ \
+    SYSTEM1_BACKEND=laya \
+    SYSTEM2_BACKEND=mock \
+    LAYA_PRELOAD=true \
+    PORT=8080 \
+    LOG_LEVEL=INFO \
+    HF_HOME=/srv/app/.hf-cache
+
+EXPOSE 8080
+
+CMD ["python3", "entrypoint_laya.py"]

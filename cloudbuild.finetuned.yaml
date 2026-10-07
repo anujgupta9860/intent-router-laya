@@ -1,0 +1,11 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args:
+  - 'build'
+  - '-f'
+  - 'Dockerfile.finetuned'
+  - '-t'
+  - 'us-central1-docker.pkg.dev/innovation-lab-2026/laya-router/laya-finetuned:20261006'
+  - '.'
+images:
+- 'us-central1-docker.pkg.dev/innovation-lab-2026/laya-router/laya-finetuned:20261006'
