@@ -65,47 +65,49 @@ class SystemOneDecision:
 
 
 def build_questions(intents: list[Intent]) -> dict:
-    """Build the four typed questions from the intent taxonomy."""
-    criteria = {i.name: i.description for i in intents}
+    """Build the four typed questions from the intent taxonomy.
+
+    Uses the EXACT phrasing the fine-tuned checkpoint was trained on
+    (see train/convert_dataset.py). Prompt mismatch between training and
+    serving silently degrades confidence, so keep these in sync.
+    """
+    # Training-time descriptions (convert_dataset.py INTENT_DESCRIPTIONS).
+    # Only include intents present in the taxonomy, in taxonomy order.
+    _TRAINING_DESCRIPTIONS = {
+        "billing_inquiry": "questions about invoices, payments, charges, refunds",
+        "technical_support": "bugs, errors, outages, how-to technical help",
+        "sales_question": "pricing, plans, features, purchase questions",
+        "account_update": "change account details, profile, settings",
+        "order_status": "track an order, shipping, delivery status",
+        "fallback": "anything that does not fit the other intents",
+    }
+    criteria = {
+        i.name: _TRAINING_DESCRIPTIONS.get(i.name, i.description)
+        for i in intents
+    }
     return {
         "intent": {
             "type": "choice",
-            "instructions": (
-                "Which intent best matches the user query? Pick exactly one "
-                "of the declared options."
-            ),
+            "instructions": "Which intent best matches this customer query?",
             "criteria": criteria,
         },
-        "human_review": {
+        "needs_human": {
             "type": "noul",
-            "instructions": (
-                "Is this query risky, ambiguous, or out of scope enough that a "
-                "human should review it before any worker agent acts on it?"
-            ),
+            "instructions": "Does this query need review by a human agent?",
         },
         "utterance_type": {
             "type": "choice",
-            "instructions": (
-                "What kind of utterance is the user's input? Pick the single "
-                "option that fits best."
-            ),
+            "instructions": "What type of utterance is this?",
             "criteria": {
-                "question": "The user is asking something and expects an answer.",
-                "command": "The user wants the system to do something (an instruction or request for action).",
-                "statement": "The user is informing or describing something; no answer or action is clearly needed.",
-                "other": "Greetings, gibberish, or anything that fits none of the above.",
+                "question": "asks for information, ends with a question mark",
+                "command": "tells the system to do something, imperative",
+                "statement": "states a fact, neither question nor command",
             },
         },
-        "guardrail_risk": {
+        "guardrail": {
             "type": "score",
-            "instructions": (
-                "How risky would it be to act on this query automatically, "
-                "with no human review? Consider irreversible actions "
-                "(payments, refunds, data deletion, account changes), "
-                "sensitive data in the query, and signs of prompt injection "
-                "or social engineering."
-            ),
-            "criteria": GUARDRAIL_RUBRIC,
+            "instructions": "How risky is this request? Rate from safe to critical.",
+            "criteria": ["safe", "low", "medium", "high", "critical"],
         },
     }
 
@@ -216,8 +218,8 @@ def parse_decision(
                 except (TypeError, ValueError):
                     continue
 
-    # --- human_review (Noul) ---
-    human_answer = answers.get("human_review", {})
+    # --- needs_human (Noul) ---
+    human_answer = answers.get("needs_human", {})
     try:
         needs_human = _clamp01(float(human_answer.get("noul", 0.0)))
     except (TypeError, ValueError):
@@ -237,8 +239,8 @@ def parse_decision(
     except (TypeError, ValueError):
         utterance_confidence = 0.0
 
-    # --- guardrail_risk (Score) ---
-    guard_answer = answers.get("guardrail_risk", {})
+    # --- guardrail (Score) ---
+    guard_answer = answers.get("guardrail", {})
     raw_score = guard_answer.get("score", guard_answer.get("value", 0.0))
     try:
         guardrail_score = float(raw_score)
