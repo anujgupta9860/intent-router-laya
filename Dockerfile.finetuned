@@ -1,5 +1,7 @@
-# Intent router serving the FINE-TUNED Laya checkpoint (RLCD, 2026-10-06).
+# Intent router serving the FINE-TUNED 11-decision encoder checkpoint (RLCD v2, 2026-10-08).
 # Downloads the checkpoint from GCS at container startup, then serves.
+# Note: the v2 checkpoint is a ModernBERT encoder fine-tune (HF format), so
+# SYSTEM1_BACKEND=encoder — the 'laya' backend needs Laya RL Agent weights.
 FROM python:3.12-slim
 
 WORKDIR /srv/app
@@ -14,8 +16,8 @@ COPY src/ ./src/
 COPY entrypoint_laya.py ./
 
 ENV LAYA_CHECKPOINT=/srv/app/checkpoints/laya_finetuned \
-    CHECKPOINT_GCS=gs://laya-checkpoints-anuj/laya-rlcd/laya_finetuned/ \
-    SYSTEM1_BACKEND=laya \
+    CHECKPOINT_GCS=gs://laya-checkpoints-anuj/laya-rlcd-v2/serving/ \
+    SYSTEM1_BACKEND=encoder \
     SYSTEM2_BACKEND=mock \
     LAYA_PRELOAD=true \
     PORT=8080 \
