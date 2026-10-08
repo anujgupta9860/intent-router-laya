@@ -34,6 +34,7 @@ import time
 
 from .a2a_client import A2AClient
 from .gemma_client import GemmaReviewer, SystemTwoJudgment
+from .feedback import FeedbackLogger
 from .intents import Intent
 from .laya_client import (
     GUARDRAIL_RUBRIC,
@@ -301,6 +302,7 @@ class HybridRouter:
         guardrail_review_score: float = 1.5,
         guardrail_block_score: float = 3.0,
         a2a_client: A2AClient | None = None,
+        feedback_logger: FeedbackLogger | None = None,
     ) -> None:
         self.system_one = system_one
         self.system_two = system_two
@@ -310,6 +312,9 @@ class HybridRouter:
         self.guardrail_review_score = guardrail_review_score
         self.guardrail_block_score = guardrail_block_score
         self.a2a = a2a_client or A2AClient()
+        # RLCD feedback loop: log every System 2 review for human review
+        # and future retraining. None disables it.
+        self.feedback = feedback_logger
         # worker_agent ("billing", "support", ...) -> worker URL, derived
         # from the intent taxonomy's worker: mapping and the intent->URL map.
         self._worker_agent_urls: dict[str, str] = {}
@@ -359,6 +364,41 @@ class HybridRouter:
         s2: SystemTwoJudgment | None = None
         if not fast_path:
             s2 = self.system_two.review(text, s1)
+            # --- RLCD feedback: log System 2's judgment for human review.
+            # Usable as a training label only when Gemma actually decided
+            # (not escalated) — the human review gate filters the rest. ---
+            if self.feedback is not None and s2 is not None:
+                self.feedback.log(
+                    query=text,
+                    s1={
+                        "intent": s1.intent, "confidence": s1.confidence,
+                        "worker_agent": s1.worker_agent,
+                        "worker_confidence": s1.worker_confidence,
+                        "skill_required": s1.skill_required,
+                        "skill_confidence": s1.skill_confidence,
+                        "needs_human": s1.needs_human,
+                        "utterance_type": s1.utterance_type,
+                        "guardrail_score": s1.guardrail_score,
+                        "needs_rag": s1.needs_rag,
+                        "needs_more_input": s1.needs_more_input,
+                        "needs_user_details": s1.needs_user_details,
+                        "is_multi_turn": s1.is_multi_turn,
+                        "needs_async": s1.needs_async,
+                    },
+                    s2={
+                        "intent": s2.intent, "confidence": s2.confidence,
+                        "escalate_to_human": s2.escalate_to_human,
+                        "worker_agent": s2.worker_agent,
+                        "skill_required": s2.skill_required,
+                        "needs_rag": s2.needs_rag,
+                        "needs_more_input": s2.needs_more_input,
+                        "needs_user_details": s2.needs_user_details,
+                        "is_multi_turn": s2.is_multi_turn,
+                        "needs_async": s2.needs_async,
+                        "rationale": s2.rationale,
+                    },
+                    usable_label=not s2.escalate_to_human,
+                )
 
         return self._respond(text, s1, s2, path="fast" if fast_path else "system2",
                              started=started)

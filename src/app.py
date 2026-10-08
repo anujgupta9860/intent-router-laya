@@ -19,9 +19,11 @@ from pydantic import BaseModel, Field
 
 from .a2a_client import A2AClient
 from .config import Settings
+from .feedback import FeedbackLogger, feedback_to_dataset
 from .gemma_client import GemmaReviewer
 from .hybrid import MORE_INPUT_REVIEW_THRESHOLD, HybridRouter, SystemOne
 from .intents import intent_names, load_intents
+from .rlcd import get_job, list_jobs, start_training_job
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +63,10 @@ async def lifespan(app: FastAPI):
         guardrail_review_score=settings.guardrail_review_score,
         guardrail_block_score=settings.guardrail_block_score,
         a2a_client=A2AClient(),
+        # RLCD feedback loop: log every System 2 review for human
+        # review + retraining. Disable with FEEDBACK_ENABLED=false.
+        feedback_logger=FeedbackLogger(
+            enabled=getattr(settings, "feedback_enabled", True)),
     )
     _state.update(settings=settings, intents=intents, router=router)
     log.info(
@@ -145,3 +151,86 @@ def classify(req: QueryRequest):
 @app.post("/route")
 def route(req: QueryRequest):
     return _router().handle_query(req.text)
+
+
+# ---------------------------------------------------------------- RLCD loop
+# System 1 low-confidence -> System 2 (Gemma) -> human review -> retrain.
+
+
+def _feedback() -> FeedbackLogger:
+    fb = _router().feedback
+    if fb is None:
+        raise HTTPException(status_code=503, detail="feedback logging disabled")
+    return fb
+
+
+@app.get("/rlcd/stats")
+def rlcd_stats():
+    """Feedback counts + the SDR §13 KPI: System 1 fast-path rate."""
+    return _feedback().stats()
+
+
+@app.get("/rlcd/review")
+def rlcd_review_queue(limit: int = 50):
+    """Pending Gemma decisions awaiting human review (newest first)."""
+    return {"pending": _feedback().list_pending(limit=limit)}
+
+
+class ReviewDecision(BaseModel):
+    decision: str = Field(pattern="^(approved|corrected|rejected)$")
+    reviewer: str = "human"
+    corrections: dict | None = None
+
+
+@app.post("/rlcd/review/{record_id}")
+def rlcd_review(record_id: str, req: ReviewDecision):
+    """Human review gate: approve Gemma's labels, correct them, or reject."""
+    ok = _feedback().review(record_id, req.decision,
+                            reviewer=req.reviewer,
+                            corrections=req.corrections)
+    if not ok:
+        raise HTTPException(status_code=404, detail="record not found")
+    return {"record_id": record_id, "decision": req.decision}
+
+
+class ExportRequest(BaseModel):
+    out: str = "train/rlcd_feedback.jsonl"
+
+
+@app.post("/rlcd/export")
+def rlcd_export(req: ExportRequest):
+    """Export human-approved records to training JSONL for finetune.py."""
+    fb = _feedback()
+    result = feedback_to_dataset(fb.path, req.out)
+    return result
+
+
+class TrainRequest(BaseModel):
+    dataset: str = "train/rlcd_feedback.jsonl"
+    out_dir: str = "models/laya_rlcd_v2"
+    mode: str = Field(default="spot-vm", pattern="^(local|spot-vm)$")
+    epochs: float = 4.0
+
+
+@app.post("/rlcd/train")
+def rlcd_train(req: TrainRequest):
+    """Trigger retraining on the exported approved dataset.
+
+    mode=local runs finetune.py in a background thread (CPU demo only).
+    mode=spot-vm returns the gcloud commands for the GPU flow.
+    """
+    return start_training_job(req.dataset, req.out_dir,
+                              mode=req.mode, epochs=req.epochs)
+
+
+@app.get("/rlcd/train/{job_id}")
+def rlcd_train_status(job_id: str):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
+
+
+@app.get("/rlcd/train")
+def rlcd_train_jobs():
+    return {"jobs": list_jobs()}

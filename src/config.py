@@ -80,6 +80,12 @@ class Settings:
 
         self.worker_agents: dict[str, str] = self._load_worker_agents()
         self.log_level: str = _get("LOG_LEVEL", "INFO").upper()
+        # RLCD feedback loop: set FEEDBACK_ENABLED=false to disable logging
+        # of System 2 reviews (e.g. for eval runs you don't want to pollute
+        # the training pool).
+        self.feedback_enabled: bool = _get("FEEDBACK_ENABLED", "true").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
 
     @classmethod
     def _load_worker_agents(cls) -> dict[str, str]:

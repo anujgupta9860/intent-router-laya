@@ -38,12 +38,20 @@ _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 @dataclass
 class SystemTwoJudgment:
-    """System 2's final word on a query."""
+    """System 2's final word on a query (all 11 decisions, 2026-10-08)."""
     intent: str
     confidence: float
     escalate_to_human: bool
     rationale: str = ""
     raw: str = ""
+    # --- routing decisions (match SystemOneDecision) ---
+    worker_agent: str = "fallback"
+    skill_required: str = "none"
+    needs_rag: float = 0.0
+    needs_more_input: float = 0.0
+    needs_user_details: float = 0.0
+    is_multi_turn: float = 0.0
+    needs_async: float = 0.0
 
 
 def build_review_prompt(
@@ -66,7 +74,12 @@ def build_review_prompt(
         "",
         "Respond with ONLY a JSON object and no other text, in this exact shape:",
         '{"intent": "<intent_name>", "confidence": <0.0-1.0>, '
-        '"escalate_to_human": <true|false>, "rationale": "<one sentence>"}',
+        '"escalate_to_human": <true|false>, "rationale": "<one sentence>", '
+        '"worker_agent": "<billing|support|sales|account|orders|fallback>", '
+        '"skill_required": "<none|billing_lookup|refund_process|order_tracking|account_modify|knowledge_search|escalation>", '
+        '"needs_rag": <true|false>, "needs_more_input": <true|false>, '
+        '"needs_user_details": <true|false>, "is_multi_turn": <true|false>, '
+        '"needs_async": <true|false>}',
         "",
         "Allowed intents:",
     ]
@@ -89,6 +102,13 @@ def build_review_prompt(
         "  a human review.",
         '- If nothing fits, use intent "fallback" with escalate_to_human=true.',
         "- Never invent an intent name that is not in the list above.",
+        "- worker_agent: which worker should handle this query.",
+        "- skill_required: the capability needed (none if it is a plain answer).",
+        "- needs_rag: true if answering needs knowledge-base / help-docs lookup.",
+        "- needs_more_input: true if the query is missing details needed to act.",
+        "- needs_user_details: true if handling needs the user's account data.",
+        "- is_multi_turn: true if this looks like a follow-up (pronouns, fragments).",
+        "- needs_async: true if this needs long-running background work.",
         "",
         f"User query: {text!r}",
     ]
@@ -130,9 +150,28 @@ def parse_judgment(raw: str, intents: list[Intent]) -> SystemTwoJudgment:
         escalate = True
         confidence = min(confidence, 0.4)
     rationale = str(data.get("rationale", ""))[:500]
+    # --- routing decisions (defensive: fall back to safe defaults) ---
+    worker_agent = str(data.get("worker_agent", "fallback")).strip() or "fallback"
+    skill_required = str(data.get("skill_required", "none")).strip() or "none"
+
+    def _noul(key: str) -> float:
+        v = data.get(key, False)
+        if isinstance(v, bool):
+            return 1.0 if v else 0.0
+        try:
+            return 1.0 if float(v) >= 0.5 else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
     return SystemTwoJudgment(
         intent=intent, confidence=confidence,
         escalate_to_human=escalate, rationale=rationale, raw=raw,
+        worker_agent=worker_agent, skill_required=skill_required,
+        needs_rag=_noul("needs_rag"),
+        needs_more_input=_noul("needs_more_input"),
+        needs_user_details=_noul("needs_user_details"),
+        is_multi_turn=_noul("is_multi_turn"),
+        needs_async=_noul("needs_async"),
     )
 
 
