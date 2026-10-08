@@ -348,3 +348,112 @@ real queue (Cloud Tasks / Pub/Sub) and Vertex AI Custom Jobs.
 **Scheduling:** `scripts/rlcd_scheduled.sh` — cron/Cloud Scheduler
 driver: skips unless ≥50 new approvals since last run, then exports and
 triggers. KPI: fast-path rate from `/rlcd/stats` should climb each cycle.
+
+### §14.1 Curl reference (expected outputs; endpoints land with the v2 deploy)
+
+```bash
+BASE=https://laya-encoder-router-1031371624665.us-central1.run.app
+```
+
+**Stats — feedback counts + the fast-path KPI:**
+```bash
+curl -s $BASE/rlcd/stats | python3 -m json.tool
+```
+```json
+{
+  "feedback_log": "feedback/fallbacks.jsonl",
+  "total_fallbacks": 37,
+  "usable_labels": 29,
+  "pending_review": 12,
+  "approved_for_training": 17
+}
+```
+
+**Review queue — pending Gemma decisions, newest first:**
+```bash
+curl -s "$BASE/rlcd/review?limit=1" | python3 -m json.tool
+```
+```json
+{
+  "pending": [
+    {
+      "id": "a3f9c1d2e4b5",
+      "ts": 1791489000.0,
+      "query": "refund my last charge",
+      "s1": {"intent": "order_status", "confidence": 0.593, "worker_agent": "orders",
+             "skill_required": "none", "needs_human": 0.1, "guardrail_score": 1.0, ...},
+      "s2": {"intent": "billing_inquiry", "confidence": 0.92, "escalate_to_human": false,
+             "worker_agent": "billing", "skill_required": "refund_process",
+             "needs_rag": 0.0, "needs_more_input": 0.0, "needs_user_details": 1.0,
+             "is_multi_turn": 0.0, "needs_async": 0.0,
+             "rationale": "Refund request maps to billing with refund_process skill."},
+      "usable_label": true,
+      "review_status": "pending"
+    }
+  ]
+}
+```
+
+**Approve / correct / reject:**
+```bash
+# approve — Gemma's labels stand
+curl -s -X POST $BASE/rlcd/review/a3f9c1d2e4b5 \
+  -H 'content-type: application/json' -d '{"decision": "approved"}'
+# {"record_id": "a3f9c1d2e4b5", "decision": "approved"}
+
+# correct — human labels override Gemma's at export time
+curl -s -X POST $BASE/rlcd/review/a3f9c1d2e4b5 \
+  -H 'content-type: application/json' \
+  -d '{"decision": "corrected", "corrections": {"intent": "billing_inquiry", "skill_required": "refund_process"}}'
+# {"record_id": "a3f9c1d2e4b5", "decision": "corrected"}
+
+# reject — excluded from training
+curl -s -X POST $BASE/rlcd/review/a3f9c1d2e4b5 \
+  -H 'content-type: application/json' -d '{"decision": "rejected"}'
+# {"record_id": "a3f9c1d2e4b5", "decision": "rejected"}
+```
+
+**Export approved records → training JSONL:**
+```bash
+curl -s -X POST $BASE/rlcd/export \
+  -H 'content-type: application/json' \
+  -d '{"out": "train/rlcd_feedback.jsonl"}' | python3 -m json.tool
+```
+```json
+{"written": 17, "skipped": 20, "dataset": "train/rlcd_feedback.jsonl"}
+```
+(skipped = pending/rejected/unusable — only approved/corrected train.)
+
+**Trigger training:**
+```bash
+# local mode: background thread on the service host (CPU demo only)
+curl -s -X POST $BASE/rlcd/train \
+  -H 'content-type: application/json' \
+  -d '{"dataset": "train/rlcd_feedback.jsonl", "mode": "local"}' | python3 -m json.tool
+```
+```json
+{"job_id": "7b2e9a1c4f03", "mode": "local", "status": "started",
+ "detail": "training in background thread; poll GET /rlcd/train/{job_id}"}
+```
+```bash
+# spot-vm mode: returns the gcloud commands for the GPU flow
+curl -s -X POST $BASE/rlcd/train \
+  -H 'content-type: application/json' \
+  -d '{"dataset": "train/rlcd_feedback.jsonl", "mode": "spot-vm", "epochs": 4}' \
+  | python3 -m json.tool
+```
+```json
+{"job_id": "c41d88f2a6e0", "mode": "spot-vm", "status": "awaiting_vm",
+ "detail": "Dataset exported. Run these on a spot T4 VM (see docs/TRAIN_ON_GCP.md):",
+ "commands": ["gcloud compute instances create laya-rlcd-train ...", "..."]}
+```
+
+**Job status:**
+```bash
+curl -s $BASE/rlcd/train/7b2e9a1c4f03 | python3 -m json.tool
+```
+```json
+{"job_id": "7b2e9a1c4f03", "mode": "local", "dataset": "train/rlcd_feedback.jsonl",
+ "out_dir": "models/laya_rlcd_v2", "epochs": 4.0, "status": "running",
+ "created_ts": 1791489000.0, "started_ts": 1791489001.5}
+```
