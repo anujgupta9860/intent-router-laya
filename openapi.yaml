@@ -1,0 +1,356 @@
+openapi: 3.0.3
+info:
+  title: "Intent Router (Hybrid: Laya System 1 + Gemma System 2)"
+  description: |
+    Self-hosted intent router with an RLCD feedback loop (§13–14 of docs/SDR.md).
+    Every System 2 (Gemma) review is logged; a human reviews it; approved
+    records retrain System 1 on demand or on schedule.
+  version: 0.2.0
+  contact:
+    name: intent-router-laya
+    url: https://github.com/anujgupta9860/intent-router-laya
+servers:
+  - url: https://laya-encoder-router-1031371624665.us-central1.run.app
+    description: Live deployment (Innovation Lab, GCP)
+  - url: http://localhost:8080
+    description: Local dev
+
+paths:
+  /health:
+    get:
+      summary: Liveness/readiness probe
+      operationId: health
+      responses:
+        '200':
+          description: Service status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, example: ok}
+                  system1: {type: string, example: laya}
+                  system1_checkpoint: {type: string}
+                  system2: {type: string, example: mock}
+                  intents: {type: array, items: {type: string}}
+
+  /classify:
+    post:
+      summary: System 1 decision; runs System 2 when the policy triggers it
+      operationId: classify
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/QueryRequest'}
+      responses:
+        '200':
+          description: All 11 System 1 decisions (+ System 2 judgment when used)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ClassifyResponse'}
+
+  /route:
+    post:
+      summary: Full routing decision + A2A dispatch
+      operationId: route
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/QueryRequest'}
+      responses:
+        '200':
+          description: Routing decision
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RouteResponse'}
+
+  /rlcd/stats:
+    get:
+      summary: Feedback counts + fast-path KPI
+      operationId: rlcdStats
+      tags: [RLCD]
+      responses:
+        '200':
+          description: Feedback loop statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  feedback_log: {type: string, example: feedback/fallbacks.jsonl}
+                  total_fallbacks: {type: integer, example: 37}
+                  usable_labels: {type: integer, example: 29}
+                  pending_review: {type: integer, example: 12}
+                  approved_for_training: {type: integer, example: 17}
+
+  /rlcd/review:
+    get:
+      summary: Pending Gemma decisions awaiting human review (newest first)
+      operationId: rlcdReviewQueue
+      tags: [RLCD]
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, default: 50}
+      responses:
+        '200':
+          description: Pending records
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pending:
+                    type: array
+                    items: {$ref: '#/components/schemas/FeedbackRecord'}
+
+  /rlcd/review/{record_id}:
+    post:
+      summary: Human review gate — approve, correct, or reject Gemma's labels
+      operationId: rlcdReview
+      tags: [RLCD]
+      parameters:
+        - name: record_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReviewDecision'}
+      responses:
+        '200':
+          description: Review recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  record_id: {type: string}
+                  decision: {type: string, example: approved}
+        '404':
+          description: Record not found
+
+  /rlcd/export:
+    post:
+      summary: Export human-approved records to training JSONL
+      operationId: rlcdExport
+      tags: [RLCD]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                out: {type: string, default: train/rlcd_feedback.jsonl}
+      responses:
+        '200':
+          description: Export result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  written: {type: integer, example: 17, description: approved/corrected records exported}
+                  skipped: {type: integer, example: 20, description: pending/rejected/unusable records skipped}
+                  dataset: {type: string, example: train/rlcd_feedback.jsonl}
+
+  /rlcd/train:
+    post:
+      summary: Trigger retraining on the exported approved dataset
+      operationId: rlcdTrain
+      tags: [RLCD]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TrainRequest'}
+      responses:
+        '200':
+          description: Training job started (local) or instructions (spot-vm)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id: {type: string}
+                  mode: {type: string, enum: [local, spot-vm]}
+                  status: {type: string, example: started}
+                  detail: {type: string}
+                  commands:
+                    type: array
+                    items: {type: string}
+                    description: gcloud commands for the GPU flow (spot-vm mode only)
+    get:
+      summary: List training jobs
+      operationId: rlcdTrainJobs
+      tags: [RLCD]
+      responses:
+        '200':
+          description: All jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items: {$ref: '#/components/schemas/TrainJob'}
+
+  /rlcd/train/{job_id}:
+    get:
+      summary: Training job status
+      operationId: rlcdTrainStatus
+      tags: [RLCD]
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Job status
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TrainJob'}
+        '404':
+          description: Job not found
+
+components:
+  schemas:
+    QueryRequest:
+      type: object
+      required: [text]
+      properties:
+        text: {type: string, minLength: 1, maxLength: 2000, example: delete my account}
+
+    System1Decisions:
+      type: object
+      description: All 11 System 1 typed decisions
+      properties:
+        system1_intent: {type: string, example: account_update}
+        confidence: {type: number, example: 0.993}
+        probabilities: {type: object, additionalProperties: {type: number}}
+        needs_human: {type: number, example: 0.05}
+        utterance_type: {type: string, example: command}
+        guardrail_score: {type: number, example: 1.0}
+        guardrail_band: {type: string, example: low}
+        worker_agent: {type: string, example: account}
+        worker_confidence: {type: number, example: 0.95}
+        skill_required: {type: string, example: account_modify}
+        skill_confidence: {type: number, example: 0.9}
+        needs_rag: {type: number, example: 0.0}
+        needs_more_input: {type: number, example: 0.0}
+        needs_user_details: {type: number, example: 1.0}
+        is_multi_turn: {type: number, example: 0.0}
+        needs_async: {type: number, example: 0.0}
+
+    ClassifyResponse:
+      allOf:
+        - $ref: '#/components/schemas/System1Decisions'
+        - type: object
+          properties:
+            system2_used: {type: boolean}
+            system2_intent: {type: string, nullable: true}
+            system2_confidence: {type: number, nullable: true}
+            system2_escalated: {type: boolean, nullable: true}
+            system2_rationale: {type: string, nullable: true}
+
+    RouteResponse:
+      allOf:
+        - $ref: '#/components/schemas/System1Decisions'
+        - type: object
+          properties:
+            path: {type: string, enum: [fast, system2, guardrail_block, empty]}
+            intent: {type: string, example: account_update}
+            gates:
+              type: object
+              properties:
+                low_confidence: {type: boolean}
+                human_review: {type: boolean}
+                guardrail_review: {type: boolean}
+                guardrail_block: {type: boolean}
+                needs_more_input: {type: boolean}
+            system2_used: {type: boolean}
+            system2_intent: {type: string, nullable: true}
+            system2_escalated: {type: boolean}
+            system2_rationale: {type: string}
+            routed_to_fallback: {type: boolean}
+            worker: {type: string}
+            worker_name: {type: string}
+            task_id: {type: string}
+            latency_ms: {type: number}
+            ts: {type: number}
+
+    FeedbackRecord:
+      type: object
+      properties:
+        id: {type: string, example: a3f9c1d2e4b5}
+        ts: {type: number}
+        query: {type: string, example: refund my last charge}
+        s1: {$ref: '#/components/schemas/System1Decisions'}
+        s2:
+          type: object
+          nullable: true
+          properties:
+            intent: {type: string}
+            confidence: {type: number}
+            escalate_to_human: {type: boolean}
+            worker_agent: {type: string}
+            skill_required: {type: string}
+            needs_rag: {type: number}
+            needs_more_input: {type: number}
+            needs_user_details: {type: number}
+            is_multi_turn: {type: number}
+            needs_async: {type: number}
+            rationale: {type: string}
+        usable_label: {type: boolean}
+        review_status: {type: string, enum: [pending, approved, corrected, rejected]}
+        reviewed_by: {type: string, nullable: true}
+        reviewed_ts: {type: number, nullable: true}
+        corrections: {type: object, nullable: true, description: human label overrides}
+
+    ReviewDecision:
+      type: object
+      required: [decision]
+      properties:
+        decision: {type: string, enum: [approved, corrected, rejected]}
+        reviewer: {type: string, default: human}
+        corrections:
+          type: object
+          nullable: true
+          description: Human label overrides (any subset of the s2 keys); win at export
+          example: {intent: billing_inquiry, skill_required: refund_process}
+
+    TrainRequest:
+      type: object
+      properties:
+        dataset: {type: string, default: train/rlcd_feedback.jsonl}
+        out_dir: {type: string, default: models/laya_rlcd_v2}
+        mode:
+          type: string
+          enum: [local, spot-vm]
+          default: spot-vm
+          description: local = background thread on host (CPU demo); spot-vm = returns gcloud commands for the GPU flow
+        epochs: {type: number, default: 4.0}
+
+    TrainJob:
+      type: object
+      properties:
+        job_id: {type: string}
+        mode: {type: string, enum: [local, spot-vm]}
+        dataset: {type: string}
+        out_dir: {type: string}
+        epochs: {type: number}
+        status: {type: string, enum: [queued, started, running, awaiting_vm, done, failed]}
+        created_ts: {type: number}
+        started_ts: {type: number, nullable: true}
+        finished_ts: {type: number, nullable: true}
+        returncode: {type: integer, nullable: true}
+        stdout_tail: {type: string, nullable: true}
+        stderr_tail: {type: string, nullable: true}
+        error: {type: string, nullable: true}
