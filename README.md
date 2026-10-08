@@ -139,6 +139,47 @@ Full training report: `docs/LAYA_RLCD_TRAINING_REPORT.md`.
 Walkthrough video (2:40, narrated, all real console/terminal captures
 from the actual run): `docs/laya-poc-gcp-real-run.mp4`.
 
+### RLCD loop API (2026-10-08)
+
+Every query that falls back to System 2 (Gemma) is logged to
+`feedback/fallbacks.jsonl` with all 11 System 1 decisions + Gemma's
+judgment. Nothing trains until a human reviews the record.
+
+```bash
+BASE=https://laya-encoder-router-1031371624665.us-central1.run.app
+
+# feedback stats: fallback counts + approved-for-training (the SDR §13 KPI)
+curl -s $BASE/rlcd/stats | python3 -m json.tool
+
+# pending Gemma decisions awaiting human review (newest first)
+curl -s "$BASE/rlcd/review?limit=10" | python3 -m json.tool
+
+# approve a record (or correct Gemma's labels / reject it)
+curl -s -X POST $BASE/rlcd/review/<record_id> \
+  -H 'content-type: application/json' \
+  -d '{"decision": "approved"}' | python3 -m json.tool
+# correct: {"decision": "corrected", "corrections": {"intent": "order_status"}}
+# reject:  {"decision": "rejected"}
+
+# export approved records -> training JSONL (feeds train/finetune.py)
+curl -s -X POST $BASE/rlcd/export \
+  -H 'content-type: application/json' \
+  -d '{"out": "train/rlcd_feedback.jsonl"}' | python3 -m json.tool
+
+# trigger retraining: mode=local (background thread, CPU demo) or
+# mode=spot-vm (returns the gcloud commands for the GPU flow)
+curl -s -X POST $BASE/rlcd/train \
+  -H 'content-type: application/json' \
+  -d '{"dataset": "train/rlcd_feedback.jsonl", "mode": "spot-vm"}' \
+  | python3 -m json.tool
+
+# check a training job
+curl -s $BASE/rlcd/train/<job_id> | python3 -m json.tool
+```
+
+Scheduled retraining: `scripts/rlcd_scheduled.sh` (cron/Cloud Scheduler —
+checks for 50+ new approvals, exports, triggers).
+
 ## Layout
 
 ```
