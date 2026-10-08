@@ -6,9 +6,11 @@ model (Apache-2.0), and you can **train your own** classifier and serve
 it the same way.
 
 - **System 1 — Laya** (self-hosted, ~25–45 ms on GPU; ~4–11 s on CPU — see SDR §10): one `predict` call
-  returns the intent (Choice), human-review probability (Noul),
-  utterance type (Choice), and a **Score-based guardrail risk**
-  (0=safe … 4=critical). Your hardware, your data, $0 marginal cost.
+  returns **11 typed decisions** — intent (Choice), worker agent (Choice),
+  skill required (Choice), human-review probability (Noul), utterance type
+  (Choice), guardrail risk (Score, 0=safe … 4=critical), plus routing flags
+  (Noul): needs RAG, needs more input, needs user details, multi-turn,
+  needs async. Your hardware, your data, $0 marginal cost.
 - **System 1 (alt) — your fine-tuned encoder**: `train/finetune.py`
   trains a ModernBERT classifier on your intents with temperature
   scaling; serve it as `SYSTEM1_BACKEND=encoder`.

@@ -26,9 +26,12 @@ classification model we train ourselves, deployed as our own service.
 - G1. **Zero commercial dependency on the hot path**: System 1 is a
   self-hosted Laya checkpoint (or our own fine-tuned encoder). No API
   keys, no per-decision billing, no query text leaving our network.
-- G2. Same four typed decisions per query as the Jev hybrid: intent
+- G2. Eleven typed decisions per query (expanded 2026-10-08 from the
+  original four): intent (Choice), worker agent (Choice), skill required
   (Choice), human-review probability (Noul), utterance type (Choice),
-  guardrail risk (Score over `[safe, low, medium, high, critical]`).
+  guardrail risk (Score over `[safe, low, medium, high, critical]`),
+  plus five routing flags (Noul): needs RAG, needs more input, needs
+  user details, multi-turn, needs async.
 - G3. Same routing policy: guardrail ≥ 3.0 → hard block; confident +
   safe → fast path; else Gemma System 2 reviews (also open weights).
 - G4. **Trainable**: ship a worked fine-tuning track (encoder +
@@ -64,10 +67,13 @@ The Laya client (`src/laya_client.py`) uses single-model mode
 at startup (`LAYA_PRELOAD`), and warms up so the first real decision
 isn't the slow one.
 
-### 4.2 The four questions (unchanged policy)
+### 4.2 The eleven questions (expanded 2026-10-08)
 
-Identical to the Jev hybrid: Choice/Noul/Choice/Score in one Laya
-`predict` call. The routing policy, gates, thresholds
+The original four (intent, human-review, utterance-type, guardrail-risk)
+are unchanged, plus seven routing decisions added 2026-10-08: worker agent
+(Choice), skill required (Choice), and five Noul flags — needs RAG, needs
+more input, needs user details, multi-turn, needs async. All eleven are
+answered in one Laya `predict` call. The routing policy, gates, thresholds
 (`CONFIDENCE_THRESHOLD` 0.6, `HUMAN_REVIEW_THRESHOLD` 0.5,
 `GUARDRAIL_REVIEW_SCORE` 1.5, `GUARDRAIL_BLOCK_SCORE` 3.0), the Gemma
 System 2 reviewer, and the A2A dispatch are unchanged — only the System

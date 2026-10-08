@@ -89,9 +89,11 @@ task-specific head converts the encoding into the declared answer type:
 
 All questions in a `predict(state, questions)` call are answered **in
 parallel in a single forward pass** — they become rows in one batch, not
-separate model calls. Our router exploits this: intent (choice) + human-review
-(noul) + utterance-type (choice) + guardrail-risk (score) are decided
-together, which is why batching 10 questions costs ~72 ms instead of 10× the
+separate model calls. Our router exploits this: intent (choice) + worker-agent
+(choice) + skill-required (choice) + human-review (noul) + utterance-type
+(choice) + guardrail-risk (score) + five routing flags (noul: needs-RAG,
+needs-more-input, needs-user-details, multi-turn, needs-async) — 11 decisions
+together, which is why batching questions costs ~72 ms instead of 11× the
 single-question cost on a T4.
 
 ### 3.5 Calibration: trusting the numbers
