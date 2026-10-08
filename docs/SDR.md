@@ -272,3 +272,40 @@ pointed at the v2 checkpoint, canary 10% → verify (`delete my account`,
 `Where is my order?`, `How do I reset my password?`) → 100%. Revision
 `00002-rwb` stays as instant rollback. The v2 serving code sends 11
 questions — it must NOT ship against the v1 4-question checkpoint.
+
+## 13. RLCD improvement loop: turning fallbacks into training signal (2026-10-08)
+
+**Problem:** System 1 is confident on easy queries but falls back to
+System 2 (Gemma) when confidence is low. Retraining on random data wastes
+capacity on cases it already handles. RLCD (Reinforcement Learning from
+Calibrated Decisions) fixes the *training distribution*.
+
+**The loop:**
+
+1. **Log the fallbacks.** Every query where System 1 confidence drops
+   below threshold routes to Gemma. Log query + Gemma's decision. These
+   are, by definition, the hardest cases — the exact frontier of
+   System 1's competence.
+2. **System 2 as labeler.** Gemma's decisions on fallback cases become
+   training labels. Targeted distillation: only the cases System 1
+   couldn't handle, not everything.
+3. **Retrain on the hard distribution.** Fine-tune the encoder on the
+   fallback set mixed with a sample of easy cases (anti-forgetting).
+   The decision boundary moves — queries that scored 0.55 now score 0.75.
+4. **Recalibrate — non-negotiable.** Re-fit temperature scaling on
+   held-out data after every retrain. Without this, confidence numbers
+   lie and the fallback threshold becomes meaningless: either too much
+   routes to the expensive LLM, or bad fast-path decisions get trusted.
+5. **Repeat.** Each cycle shrinks the fallback rate. Converges toward
+   System 1 handling everything except genuinely novel cases.
+
+**Why "reinforcement":** the reward isn't just label accuracy — it's
+*accuracy + honest confidence*. A model that's 90% accurate but claims
+99% confidence is worse for a router than 85% accurate with honest 85%,
+because the gates depend on the numbers meaning what they say.
+
+**Note for this POC:** the 2026-10-07 confidence gap (0.93 train vs 0.59
+live) was a prompt-mismatch bug, not a data problem. But once the
+11-decision model ships, this loop is the production improvement path:
+log Gemma fallback decisions, retrain on a cadence, watch fallback rate
+drop. Track it as a KPI: `% queries resolved on System 1 fast path`.
