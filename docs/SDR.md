@@ -211,3 +211,58 @@ Ran the real `convaiinnovations/laya-typed-decisions` checkpoint via
   fallback.
 - R4. Disk/memory: 421M checkpoint ≈ 1.6GB — bake into the image, don't
   download on cold start.
+
+## 12. System 1 expansion: 11 typed decisions (2026-10-08)
+
+**Driver:** Anuj's System 1 notes — for a given query, System 1 should
+decide not just the intent but the full routing picture: which worker,
+what skill, and whether the query needs RAG, clarification, user
+details, conversation context, or async execution.
+
+**New decisions** (4 original unchanged, same phrasing):
+
+| # | Question | Type | Purpose |
+|---|----------|------|---------|
+| 5 | `worker_agent` | Choice (6) | billing / support / sales / account / orders / fallback |
+| 6 | `skill_required` | Choice (7) | none / billing_lookup / refund_process / order_tracking / account_modify / knowledge_search / escalation |
+| 7 | `needs_rag` | Noul | answer needs knowledge base / help docs |
+| 8 | `needs_more_input` | Noul | query missing details needed to act |
+| 9 | `needs_user_details` | Noul | handling needs the user's account data |
+| 10 | `is_multi_turn` | Noul | follow-up in an ongoing conversation |
+| 11 | `needs_async` | Noul | needs long-running background work |
+
+**Single source of truth:** `src/system1_questions.py` holds the exact
+instructions + criteria strings. Training (`train/convert_dataset.py`)
+and serving (`src/laya_client.build_questions`) both import it verbatim
+— verified byte-identical. This is the direct lesson from the 2026-10-07
+confidence-gap incident: prompt mismatch between training and serving
+silently degrades confidence.
+
+**Dataset:** `train/build_dataset.py` emits all 11 labels via
+deterministic heuristics over the 29 taxonomy examples + 14 synthetic
+follow-up/how-to examples (kept in-code, not in `data/intents.yaml`):
+602 records (`--repeat 14`). Label balance: needs_rag 98, needs_more_input
+210, needs_user_details 406, is_multi_turn 196, needs_async 70 (of 602).
+→ 6,622 RLCD sequences (602 × 11).
+
+**Routing policy changes** (`src/hybrid.py`):
+- Worker resolution prefers System 1's `worker_agent` (falls back to
+  intent→worker mapping); routed-to-fallback still uses the fallback worker.
+- `needs_more_input >= 0.8` forces the slow path (System 2 decides whether
+  to ask a clarifying question).
+- `skill_required` + Noul flags ride along in `/route` and `/classify`
+  responses for worker adaptation.
+
+**Training:** RLCD fine-tune on a GCP spot T4 (same flow as the 2026-10-06
+run), 4 epochs, temperature calibration on holdout. Checkpoint target:
+`gs://laya-checkpoints-anuj/laya-rlcd-v2/laya_finetuned_v2/`.
+Status: _blocked 2026-10-08 — T4/L4 capacity exhausted across all tried
+zones (us-central1 a/b/c/f, us-east1 b/d, us-west1 a, europe-west4 a);
+two spot VMs preempted within minutes. Fallback: Kaggle 2×T4 notebook
+(docs/TRAIN_ON_KAGGLE.md, needs interactive session) or retry GCP later.
+
+**Deployment plan (once trained):** new image tag, `CHECKPOINT_GCS`
+pointed at the v2 checkpoint, canary 10% → verify (`delete my account`,
+`Where is my order?`, `How do I reset my password?`) → 100%. Revision
+`00002-rwb` stays as instant rollback. The v2 serving code sends 11
+questions — it must NOT ship against the v1 4-question checkpoint.
