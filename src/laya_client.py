@@ -6,13 +6,30 @@ score) in a single forward pass with no text generation - but the
 weights are yours. No API key, no per-call billing, no data leaving
 your network. ~25-45 ms per decision on local hardware.
 
-One Laya ``predict`` call carries the query plus four questions:
+One Laya ``predict`` call carries the query plus eleven questions:
 
-  * ``intent``         - Choice: which declared intent matches best.
-  * ``human_review``   - Noul: probability a human should review.
-  * ``utterance_type`` - Choice: question / command / statement / other.
-  * ``guardrail_risk`` - Score: expected risk over the ordered rubric
-                         ["safe", "low", "medium", "high", "critical"].
+  * ``intent``           - Choice: which declared intent matches best.
+  * ``human_review``     - Noul: probability a human should review.
+  * ``utterance_type``   - Choice: question / command / statement / other.
+  * ``guardrail_risk``   - Score: expected risk over the ordered rubric
+                           ["safe", "low", "medium", "high", "critical"].
+  * ``worker_agent``     - Choice: which worker agent handles this
+                           (billing / support / sales / account / orders /
+                           fallback).
+  * ``skill_required``   - Choice: what tool/skill the worker needs
+                           (none / billing_lookup / refund_process /
+                           order_tracking / account_modify /
+                           knowledge_search / escalation).
+  * ``needs_rag``        - Noul: answer needs the knowledge base?
+  * ``needs_more_input`` - Noul: query missing details needed to act?
+  * ``needs_user_details`` - Noul: handling needs the user's account data?
+  * ``is_multi_turn``    - Noul: follow-up in an ongoing conversation?
+  * ``needs_async``      - Noul: needs long-running background work?
+
+Question phrasing is the single source of truth in
+``src/system1_questions.py`` — training (train/convert_dataset.py) and
+serving both import it verbatim. Prompt mismatch between training and
+serving silently degrades confidence, so never rephrase either side.
 
 Checkpoints (``convaiinnovations/`` on Hugging Face):
   * ``laya-typed-decisions`` - fine-tuned for typed decisions (default;
@@ -31,6 +48,14 @@ import time
 from dataclasses import dataclass, field
 
 from .intents import Intent
+from .system1_questions import (
+    INTENT_DESCRIPTIONS,
+    NOUL_QUESTIONS,
+    QUESTIONS,
+    SKILL_DESCRIPTIONS,
+    UTTERANCE_DESCRIPTIONS,
+    WORKER_DESCRIPTIONS,
+)
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +66,10 @@ GUARDRAIL_RUBRIC = ["safe", "low", "medium", "high", "critical"]
 _UTTERANCE_TYPES = {"question", "command", "statement", "other"}
 
 DEFAULT_CHECKPOINT = "convaiinnovations/laya-typed-decisions"
+
+#: Valid worker-agent and skill option sets (from the shared spec).
+_WORKER_AGENTS = set(WORKER_DESCRIPTIONS)
+_SKILLS = set(SKILL_DESCRIPTIONS)
 
 
 @dataclass
@@ -55,6 +84,16 @@ class SystemOneDecision:
     guardrail_score: float = 0.0
     model: str = ""
     latency_ms: float = 0.0
+    # --- routing decisions (added 2026-10-08) ---
+    worker_agent: str = "fallback"
+    worker_confidence: float = 0.0
+    skill_required: str = "none"
+    skill_confidence: float = 0.0
+    needs_rag: float = 0.0
+    needs_more_input: float = 0.0
+    needs_user_details: float = 0.0
+    is_multi_turn: float = 0.0
+    needs_async: float = 0.0
 
     @property
     def guardrail_band(self) -> str:
@@ -65,51 +104,29 @@ class SystemOneDecision:
 
 
 def build_questions(intents: list[Intent]) -> dict:
-    """Build the four typed questions from the intent taxonomy.
+    """Build the eleven typed questions from the intent taxonomy.
 
-    Uses the EXACT phrasing the fine-tuned checkpoint was trained on
-    (see train/convert_dataset.py). Prompt mismatch between training and
-    serving silently degrades confidence, so keep these in sync.
+    Uses the EXACT phrasing the fine-tuned checkpoint was trained on —
+    imported verbatim from ``src/system1_questions.py`` (the single
+    source of truth shared with train/convert_dataset.py). Prompt
+    mismatch between training and serving silently degrades confidence,
+    so keep these in sync: never rephrase here.
     """
-    # Training-time descriptions (convert_dataset.py INTENT_DESCRIPTIONS).
     # Only include intents present in the taxonomy, in taxonomy order.
-    _TRAINING_DESCRIPTIONS = {
-        "billing_inquiry": "questions about invoices, payments, charges, refunds",
-        "technical_support": "bugs, errors, outages, how-to technical help",
-        "sales_question": "pricing, plans, features, purchase questions",
-        "account_update": "change account details, profile, settings",
-        "order_status": "track an order, shipping, delivery status",
-        "fallback": "anything that does not fit the other intents",
-    }
-    criteria = {
-        i.name: _TRAINING_DESCRIPTIONS.get(i.name, i.description)
+    intent_criteria = {
+        i.name: INTENT_DESCRIPTIONS.get(i.name, i.description)
         for i in intents
+        if i.name in INTENT_DESCRIPTIONS
     }
-    return {
-        "intent": {
-            "type": "choice",
-            "instructions": "Which intent best matches this customer query?",
-            "criteria": criteria,
-        },
-        "needs_human": {
-            "type": "noul",
-            "instructions": "Does this query need review by a human agent?",
-        },
-        "utterance_type": {
-            "type": "choice",
-            "instructions": "What type of utterance is this?",
-            "criteria": {
-                "question": "asks for information, ends with a question mark",
-                "command": "tells the system to do something, imperative",
-                "statement": "states a fact, neither question nor command",
-            },
-        },
-        "guardrail": {
-            "type": "score",
-            "instructions": "How risky is this request? Rate from safe to critical.",
-            "criteria": ["safe", "low", "medium", "high", "critical"],
-        },
-    }
+    questions = {}
+    for qid, q in QUESTIONS.items():
+        entry: dict = {"type": q["type"], "instructions": q["instructions"]}
+        if qid == "intent":
+            entry["criteria"] = intent_criteria
+        elif "criteria" in q:
+            entry["criteria"] = q["criteria"]
+        questions[qid] = entry
+    return questions
 
 
 class LayaError(RuntimeError):
@@ -248,6 +265,24 @@ def parse_decision(
         guardrail_score = 0.0
     guardrail_score = max(0.0, min(float(len(GUARDRAIL_RUBRIC) - 1), guardrail_score))
 
+    # --- worker_agent (Choice) ---
+    worker_agent, worker_confidence = _parse_choice(
+        answers.get("worker_agent", {}), _WORKER_AGENTS, "fallback")
+
+    # --- skill_required (Choice) ---
+    skill_required, skill_confidence = _parse_choice(
+        answers.get("skill_required", {}), _SKILLS, "none")
+
+    # --- noul routing decisions ---
+    nouls = {}
+    for qid in ("needs_rag", "needs_more_input", "needs_user_details",
+                "is_multi_turn", "needs_async"):
+        ans = answers.get(qid, {})
+        try:
+            nouls[qid] = _clamp01(float(ans.get("noul", 0.0)))
+        except (TypeError, ValueError):
+            nouls[qid] = 0.0
+
     return SystemOneDecision(
         intent=choice,
         probabilities=probabilities,
@@ -258,4 +293,28 @@ def parse_decision(
         guardrail_score=round(guardrail_score, 3),
         model=model,
         latency_ms=latency_ms,
+        worker_agent=worker_agent,
+        worker_confidence=worker_confidence,
+        skill_required=skill_required,
+        skill_confidence=skill_confidence,
+        needs_rag=nouls["needs_rag"],
+        needs_more_input=nouls["needs_more_input"],
+        needs_user_details=nouls["needs_user_details"],
+        is_multi_turn=nouls["is_multi_turn"],
+        needs_async=nouls["needs_async"],
     )
+
+
+def _parse_choice(answer: dict, allowed: set[str], default: str,
+                  ) -> tuple[str, float]:
+    """Parse a Choice answer defensively: (choice, confidence)."""
+    choice = str(answer.get("choice", default))
+    if choice not in allowed:
+        log.warning("Laya returned unknown choice %r; using %r",
+                    choice, default)
+        choice = default
+    try:
+        confidence = _clamp01(float(answer.get("confidence", 0.0)))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return choice, confidence

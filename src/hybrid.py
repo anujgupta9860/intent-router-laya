@@ -2,18 +2,26 @@
 
 Routing policy (every query):
 
-  1. System 1 (Laya, ~25-45 ms local) decides: intent + confidence, Noul
-     human-review probability, utterance type, and the Score-based
-     guardrail risk (0=safe .. 4=critical).
+  1. System 1 (Laya, ~25-45 ms local) decides eleven typed questions:
+     intent + confidence, Noul human-review probability, utterance type,
+     the Score-based guardrail risk (0=safe .. 4=critical), plus the
+     routing decisions: worker_agent, skill_required, needs_rag,
+     needs_more_input, needs_user_details, is_multi_turn, needs_async.
   2. Guardrail block:  score >= GUARDRAIL_BLOCK_SCORE  -> fallback worker
      immediately. System 2 is not consulted; the risk is too high to
      spend seconds deliberating.
   3. Fast path: confidence >= CONFIDENCE_THRESHOLD and Noul <=
-     HUMAN_REVIEW_THRESHOLD and score < GUARDRAIL_REVIEW_SCORE ->
-     route straight to the intent's worker. No API cost, no LLM latency.
+     HUMAN_REVIEW_THRESHOLD and score < GUARDRAIL_REVIEW_SCORE and
+     needs_more_input < MORE_INPUT_REVIEW_THRESHOLD -> route straight
+     to the worker_agent's worker. No API cost, no LLM latency.
   4. Slow path: anything else -> System 2 (Gemma) reviews System 1's
      read and makes the final call: confirm/override the intent, or
      escalate to a human (fallback worker).
+
+The worker is resolved from System 1's worker_agent decision (falling
+back to the intent->worker mapping); skill_required and the Noul flags
+ride along in the response so workers can adapt (RAG lookup, async
+dispatch, clarification).
 
 Nothing here calls a commercial API on the fast path: Laya runs on your
 own hardware, so the marginal cost of a System 1 decision is zero.
@@ -63,6 +71,16 @@ _MOCK_KEYWORDS: dict[str, list[str]] = {
     "fallback": [],
 }
 
+#: Intent -> worker agent (mirrors data/intents.yaml worker: mapping).
+_MOCK_INTENT_WORKER = {
+    "billing_inquiry": "billing",
+    "technical_support": "support",
+    "sales_question": "sales",
+    "account_update": "account",
+    "order_status": "orders",
+    "fallback": "fallback",
+}
+
 #: Mock guardrail: risky phrases -> score on the 0..4 rubric scale.
 #: A real Laya Score question judges this semantically; the mock uses
 #: keywords so the guardrail path is testable offline.
@@ -74,11 +92,78 @@ _MOCK_RISK_PHRASES: list[tuple[float, list[str]]] = [
     (1.1, ["password", "reset", "login", "log in"]),
 ]
 
+_MOCK_ORDER_NUMBER_RE = re.compile(r"#\d+|\border\s*#?\s*\d{4,}|\b\d{5,}\b", re.I)
+_MOCK_FOLLOWUP_RE = re.compile(
+    r"\b(what about|how about|and then|and the|the (second|first|other) one)\b"
+    r"|^(yes|no|yeah|nope|okay|ok)[,.]?\s+(that|this|the|it)\b"
+    r"|\bit (still|doesn|don't|does not)\b",
+    re.I,
+)
+_MOCK_HOWTO_RE = re.compile(r"\bhow (do|can|to)\b|\bwhere are\b", re.I)
+
+
+def mock_routing_decisions(text: str, intent: str) -> dict:
+    """Deterministic stand-ins for the seven new System 1 decisions."""
+    lowered = text.lower()
+    worker_agent = _MOCK_INTENT_WORKER.get(intent, "fallback")
+    if intent == "billing_inquiry":
+        skill = ("refund_process" if "refund" in lowered or "overcharg" in lowered
+                 else "billing_lookup")
+    elif intent == "technical_support":
+        skill = "knowledge_search" if _MOCK_HOWTO_RE.search(lowered) else "none"
+    elif intent == "sales_question":
+        skill = ("knowledge_search" if re.search(
+            r"pricing|plans|features|trial|discount|offer", lowered) else "none")
+    elif intent == "account_update":
+        skill = ("knowledge_search" if _MOCK_HOWTO_RE.search(lowered)
+                 else "account_modify")
+    elif intent == "order_status":
+        skill = "order_tracking"
+    else:
+        skill = "escalation"
+
+    needs_rag = 1.0 if skill == "knowledge_search" else 0.0
+    if intent == "order_status" and not _MOCK_ORDER_NUMBER_RE.search(text):
+        needs_more_input = 0.9
+    elif _MOCK_FOLLOWUP_RE.search(text):
+        needs_more_input = 0.85
+    elif len(text.split()) <= 3 and intent == "fallback":
+        needs_more_input = 0.8
+    else:
+        needs_more_input = 0.1
+
+    if intent in ("account_update", "billing_inquiry", "order_status"):
+        needs_user_details = 0.9
+    elif intent == "technical_support" and re.search(
+            r"log ?in|password|my account", lowered):
+        needs_user_details = 0.9
+    else:
+        needs_user_details = 0.1
+
+    is_multi_turn = 0.9 if _MOCK_FOLLOWUP_RE.search(text) else 0.05
+    needs_async = 0.9 if skill == "refund_process" else 0.05
+
+    return {
+        "worker_agent": worker_agent,
+        "worker_confidence": 0.8,
+        "skill_required": skill,
+        "skill_confidence": 0.75,
+        "needs_rag": needs_rag,
+        "needs_more_input": needs_more_input,
+        "needs_user_details": needs_user_details,
+        "is_multi_turn": is_multi_turn,
+        "needs_async": needs_async,
+    }
+
 _IMPERATIVE_RE = re.compile(
     r"^(please\s+)?(cancel|update|change|send|track|give|show|get|set|add|"
     r"remove|delete|open|close|start|stop|book|order|tell|refund|pay)\b",
     re.IGNORECASE,
 )
+
+#: System 1 needs_more_input above this -> slow path so System 2 can
+#: decide whether to ask a clarifying question before dispatching.
+MORE_INPUT_REVIEW_THRESHOLD = 0.8
 
 
 def mock_utterance_type(text: str) -> str:
@@ -118,6 +203,7 @@ def mock_system_one(text: str, intents: list[Intent]) -> SystemOneDecision:
             needs_human=0.85, utterance_type=utterance,
             utterance_confidence=0.6, guardrail_score=guardrail_score,
             model="mock", latency_ms=1.0,
+            **mock_routing_decisions(text, "fallback"),
         )
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     top_intent, top_hits = ranked[0]
@@ -138,6 +224,7 @@ def mock_system_one(text: str, intents: list[Intent]) -> SystemOneDecision:
         guardrail_score=guardrail_score,
         model="mock",
         latency_ms=1.0,
+        **mock_routing_decisions(text, top_intent),
     )
 
 
@@ -223,6 +310,13 @@ class HybridRouter:
         self.guardrail_review_score = guardrail_review_score
         self.guardrail_block_score = guardrail_block_score
         self.a2a = a2a_client or A2AClient()
+        # worker_agent ("billing", "support", ...) -> worker URL, derived
+        # from the intent taxonomy's worker: mapping and the intent->URL map.
+        self._worker_agent_urls: dict[str, str] = {}
+        for intent in system_one.intents:
+            url = worker_agents.get(intent.name)
+            if url and intent.worker not in self._worker_agent_urls:
+                self._worker_agent_urls[intent.worker] = url
 
     # ------------------------------------------------------------------ API
     def resolve_worker(self, intent: str) -> str:
@@ -231,6 +325,13 @@ class HybridRouter:
         if "fallback" in self.worker_agents:
             return self.worker_agents["fallback"]
         return next(iter(self.worker_agents.values()))
+
+    def resolve_worker_for(self, s1: SystemOneDecision) -> str:
+        """Resolve the worker URL, preferring System 1's worker_agent call."""
+        url = self._worker_agent_urls.get(s1.worker_agent)
+        if url:
+            return url
+        return self.resolve_worker(s1.intent)
 
     def handle_query(self, text: str) -> dict:
         started = time.monotonic()
@@ -253,6 +354,7 @@ class HybridRouter:
             s1.confidence >= self.confidence_threshold
             and s1.needs_human <= self.human_review_threshold
             and s1.guardrail_score < self.guardrail_review_score
+            and s1.needs_more_input < MORE_INPUT_REVIEW_THRESHOLD
         )
         s2: SystemTwoJudgment | None = None
         if not fast_path:
@@ -282,6 +384,7 @@ class HybridRouter:
             "human_review": s1.needs_human > self.human_review_threshold,
             "guardrail_review": s1.guardrail_score >= self.guardrail_review_score,
             "guardrail_block": s1.guardrail_score >= self.guardrail_block_score,
+            "needs_more_input": s1.needs_more_input >= MORE_INPUT_REVIEW_THRESHOLD,
         }
 
         if path == "guardrail_block":
@@ -307,7 +410,10 @@ class HybridRouter:
             )
 
         final_intent = "fallback" if routed else intent
-        worker_url = self.resolve_worker(final_intent)
+        # Routed-to-fallback always goes to the fallback worker; otherwise
+        # prefer System 1's worker_agent decision over the intent mapping.
+        worker_url = (self.resolve_worker("fallback") if routed
+                      else self.resolve_worker_for(s1))
         dispatch = self.a2a.dispatch(worker_url, text, final_intent)
 
         return {
@@ -323,6 +429,16 @@ class HybridRouter:
             "guardrail_score": s1.guardrail_score,
             "guardrail_band": s1.guardrail_band,
             "gates": gates,
+            # --- System 1 routing decisions (2026-10-08) ---
+            "worker_agent": s1.worker_agent,
+            "worker_confidence": round(s1.worker_confidence, 3),
+            "skill_required": s1.skill_required,
+            "skill_confidence": round(s1.skill_confidence, 3),
+            "needs_rag": round(s1.needs_rag, 3),
+            "needs_more_input": round(s1.needs_more_input, 3),
+            "needs_user_details": round(s1.needs_user_details, 3),
+            "is_multi_turn": round(s1.is_multi_turn, 3),
+            "needs_async": round(s1.needs_async, 3),
             "system2_used": s2 is not None,
             "system2_intent": s2.intent if s2 else None,
             "system2_escalated": s2.escalate_to_human if s2 else False,

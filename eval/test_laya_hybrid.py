@@ -84,14 +84,20 @@ def test_settings_encoder_backend_ok(monkeypatch, tmp_path):
 
 
 # ------------------------------------------------------- Laya wire contract
-def test_build_questions_has_four_typed_questions(intents):
+def test_build_questions_has_eleven_typed_questions(intents):
+    from src.system1_questions import QUESTION_IDS
     q = build_questions(intents)
-    assert set(q) == {"intent", "human_review", "utterance_type", "guardrail_risk"}
+    assert set(q) == set(QUESTION_IDS)
     assert q["intent"]["type"] == "choice"
-    assert q["human_review"]["type"] == "noul"
+    assert q["needs_human"]["type"] == "noul"
     assert q["utterance_type"]["type"] == "choice"
-    assert q["guardrail_risk"]["type"] == "score"
-    assert q["guardrail_risk"]["criteria"] == GUARDRAIL_RUBRIC
+    assert q["guardrail"]["type"] == "score"
+    assert q["guardrail"]["criteria"] == GUARDRAIL_RUBRIC
+    assert q["worker_agent"]["type"] == "choice"
+    assert q["skill_required"]["type"] == "choice"
+    for qid in ("needs_rag", "needs_more_input", "needs_user_details",
+                "is_multi_turn", "needs_async"):
+        assert q[qid]["type"] == "noul", qid
 
 
 def _sdk_result(**overrides):
@@ -102,9 +108,16 @@ def _sdk_result(**overrides):
                 "confidence": 0.88,
                 "probabilities": {"billing_inquiry": 0.88, "fallback": 0.12},
             },
-            "human_review": {"noul": 0.1},
+            "needs_human": {"noul": 0.1},
             "utterance_type": {"choice": "question", "confidence": 0.9},
-            "guardrail_risk": {"score": 2.7},
+            "guardrail": {"score": 2.7},
+            "worker_agent": {"choice": "billing", "confidence": 0.8},
+            "skill_required": {"choice": "billing_lookup", "confidence": 0.75},
+            "needs_rag": {"noul": 0.2},
+            "needs_more_input": {"noul": 0.1},
+            "needs_user_details": {"noul": 0.9},
+            "is_multi_turn": {"noul": 0.05},
+            "needs_async": {"noul": 0.0},
         }
     }
     base["answers"].update(overrides)
@@ -122,9 +135,34 @@ def test_parse_decision_reads_all_four_answers(intents):
     assert d.model == "laya-test"
 
 
+def test_parse_decision_reads_routing_decisions(intents):
+    d = parse_decision(_sdk_result(), intents, model="laya-test")
+    assert d.worker_agent == "billing"
+    assert d.worker_confidence == pytest.approx(0.8)
+    assert d.skill_required == "billing_lookup"
+    assert d.skill_confidence == pytest.approx(0.75)
+    assert d.needs_rag == pytest.approx(0.2)
+    assert d.needs_more_input == pytest.approx(0.1)
+    assert d.needs_user_details == pytest.approx(0.9)
+    assert d.is_multi_turn == pytest.approx(0.05)
+    assert d.needs_async == pytest.approx(0.0)
+
+
+def test_parse_decision_unknown_worker_falls_back(intents):
+    d = parse_decision(
+        _sdk_result(worker_agent={"choice": "nope", "confidence": 0.9}),
+        intents,
+    )
+    assert d.worker_agent == "fallback"
+    d2 = parse_decision(
+        _sdk_result(skill_required={"choice": "nope"}), intents
+    )
+    assert d2.skill_required == "none"
+
+
 def test_parse_decision_clamps_guardrail_score(intents):
     d = parse_decision(
-        _sdk_result(guardrail_risk={"score": 99}), intents
+        _sdk_result(guardrail={"score": 99}), intents
     )
     assert d.guardrail_score == pytest.approx(4.0)
     assert d.guardrail_band == "critical"

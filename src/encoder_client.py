@@ -5,10 +5,13 @@ classification head + calibration.json with the fitted temperature) and
 serves it behind the same SystemOneDecision contract as Laya.
 
 Honest scope: the encoder predicts the *intent* (with temperature-scaled,
-calibrated confidence). The other three signals are derived, not learned:
+calibrated confidence). The other signals are derived, not learned:
   * needs_human  <- 1 - confidence (uncertain => human should look)
   * utterance_type <- lightweight heuristic (same as the mock)
   * guardrail_score <- keyword heuristic (same as the mock)
+  * worker_agent / skill_required / needs_rag / needs_more_input /
+    needs_user_details / is_multi_turn / needs_async <- keyword
+    heuristics (same as the mock, see hybrid.mock_routing_decisions)
 
 If you need learned guardrails, fine-tune Laya itself with its RLCD flow
 (see train/README.md) - its Score head is trained, not heuristic.
@@ -20,7 +23,7 @@ import logging
 import time
 from pathlib import Path
 
-from .hybrid import mock_guardrail_score, mock_utterance_type
+from .hybrid import mock_guardrail_score, mock_routing_decisions, mock_utterance_type
 from .intents import Intent
 from .laya_client import GUARDRAIL_RUBRIC, SystemOneDecision
 
@@ -79,6 +82,7 @@ class EncoderClient:
             guardrail_score=mock_guardrail_score(text),
             model=f"encoder:{self.checkpoint}",
             latency_ms=round(latency_ms, 1),
+            **mock_routing_decisions(text, intent),
         )
 
     # -------------------------------------------------------------- internals

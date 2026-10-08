@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from .a2a_client import A2AClient
 from .config import Settings
 from .gemma_client import GemmaReviewer
-from .hybrid import HybridRouter, SystemOne
+from .hybrid import MORE_INPUT_REVIEW_THRESHOLD, HybridRouter, SystemOne
 from .intents import intent_names, load_intents
 
 log = logging.getLogger(__name__)
@@ -113,12 +113,22 @@ def classify(req: QueryRequest):
         "utterance_type": s1.utterance_type,
         "guardrail_score": s1.guardrail_score,
         "guardrail_band": s1.guardrail_band,
+        "worker_agent": s1.worker_agent,
+        "worker_confidence": s1.worker_confidence,
+        "skill_required": s1.skill_required,
+        "skill_confidence": s1.skill_confidence,
+        "needs_rag": s1.needs_rag,
+        "needs_more_input": s1.needs_more_input,
+        "needs_user_details": s1.needs_user_details,
+        "is_multi_turn": s1.is_multi_turn,
+        "needs_async": s1.needs_async,
         "system2_used": False,
     }
     needs_s2 = (
         s1.confidence < router.confidence_threshold
         or s1.needs_human > router.human_review_threshold
         or s1.guardrail_score >= router.guardrail_review_score
+        or s1.needs_more_input >= MORE_INPUT_REVIEW_THRESHOLD
     ) and s1.guardrail_score < router.guardrail_block_score
     if needs_s2:
         s2 = router.system_two.review(req.text.strip(), s1)
