@@ -309,3 +309,42 @@ live) was a prompt-mismatch bug, not a data problem. But once the
 11-decision model ships, this loop is the production improvement path:
 log Gemma fallback decisions, retrain on a cadence, watch fallback rate
 drop. Track it as a KPI: `% queries resolved on System 1 fast path`.
+
+## 14. RLCD loop API (2026-10-08)
+
+Implements §13 as a live feedback pipeline: every System 2 review is
+logged, a human reviews it, approved records train, training runs on
+demand or on schedule.
+
+**Logging** (`src/feedback.py` — `FeedbackLogger`): every System 2
+review appends one JSONL record to `feedback/fallbacks.jsonl` with the
+query, all 11 System 1 decisions, all 11 System 2 judgments, and
+`usable_label` (false when Gemma escalated). Review status starts at
+`pending`. Gemma's review prompt now asks for all 11 decisions, not just
+intent (`src/gemma_client.py`). Disable with `FEEDBACK_ENABLED=false`.
+
+**Human review gate:** nothing trains without approval. `pending` →
+`approved` (Gemma's labels stand) | `corrected` (human `corrections`
+override Gemma at export) | `rejected` (excluded).
+
+**Endpoints** (`src/app.py`):
+
+| Method & path | Purpose |
+|---|---|
+| `GET /rlcd/stats` | fallback counts, pending_review, approved_for_training |
+| `GET /rlcd/review?limit=N` | pending Gemma decisions, newest first |
+| `POST /rlcd/review/{id}` | `{"decision": "approved"\|"corrected"\|"rejected", "corrections": {...}}` |
+| `POST /rlcd/export` | `{"out": "train/rlcd_feedback.jsonl"}` — approved records → training JSONL (schema matches `train/build_dataset.py`) |
+| `POST /rlcd/train` | `{"dataset": ..., "mode": "local"\|"spot-vm", "epochs": 4}` — launches training |
+| `GET /rlcd/train/{job_id}` | job status |
+| `GET /rlcd/train` | list jobs |
+
+**Training modes** (`src/rlcd.py`): `local` runs `train/finetune.py` in
+a background thread (CPU demo only — the serving container has no GPU).
+`spot-vm` exports the dataset and returns the exact `gcloud` commands for
+the GPU flow (docs/TRAIN_ON_GCP.md). Production should back this with a
+real queue (Cloud Tasks / Pub/Sub) and Vertex AI Custom Jobs.
+
+**Scheduling:** `scripts/rlcd_scheduled.sh` — cron/Cloud Scheduler
+driver: skips unless ≥50 new approvals since last run, then exports and
+triggers. KPI: fast-path rate from `/rlcd/stats` should climb each cycle.
