@@ -1,0 +1,37 @@
+# Intent router serving the LAYA RLCD fine-tuned checkpoint (Track B, 2026-10-09).
+# Downloads the checkpoint from GCS at container startup, then serves.
+# NOTE: this checkpoint holds Laya RL Agent weights (model.safetensors +
+# rl_agent_config.json + encoder/ + tokenizer/), NOT the ModernBERT encoder
+# format — so SYSTEM1_BACKEND=laya here (the encoder build is Dockerfile.finetuned).
+FROM python:3.12-slim
+
+WORKDIR /srv/app
+COPY requirements.txt .
+
+# Pinned working combo from the 2026-10-09 Laya RLCD training run:
+#   torch 2.6.0 (CPU build — Cloud Run has no GPU),
+#   transformers 4.50.0, tokenizers 0.21.x.
+# (Training notes said tokenizers 0.20.3, but pip refuses that combo:
+# transformers 4.50.0 requires tokenizers>=0.21,<0.22.)
+# transformers 5.x is broken in this env; 4.44 lacks ModernBERT support.
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch==2.6.0" \
+ && pip install --no-cache-dir "transformers==4.50.0" "tokenizers==0.21.0" \
+ && pip install --no-cache-dir -r requirements.txt \
+ && pip install --no-cache-dir laya google-cloud-storage
+
+COPY data/ ./data/
+COPY src/ ./src/
+COPY entrypoint_laya.py ./
+
+ENV LAYA_CHECKPOINT=/srv/app/checkpoints/laya_rlcd \
+    CHECKPOINT_GCS=gs://laya-checkpoints-anuj/laya-rlcd-v2-laya/laya_finetuned/ \
+    SYSTEM1_BACKEND=laya \
+    SYSTEM2_BACKEND=mock \
+    LAYA_PRELOAD=true \
+    PORT=8080 \
+    LOG_LEVEL=INFO \
+    HF_HOME=/srv/app/.hf-cache
+
+EXPOSE 8080
+
+CMD ["python3", "entrypoint_laya.py"]

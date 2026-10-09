@@ -1,0 +1,11 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args:
+  - 'build'
+  - '-f'
+  - 'Dockerfile.laya'
+  - '-t'
+  - 'us-central1-docker.pkg.dev/innovation-lab-2026/laya-router/laya-rlcd:20261009'
+  - '.'
+images:
+- 'us-central1-docker.pkg.dev/innovation-lab-2026/laya-router/laya-rlcd:20261009'
