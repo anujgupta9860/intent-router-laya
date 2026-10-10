@@ -80,6 +80,12 @@ class Settings:
 
         self.worker_agents: dict[str, str] = self._load_worker_agents()
         self.log_level: str = _get("LOG_LEVEL", "INFO").upper()
+        # --- Tier-2 unified intent analyzer (intent-analyzer-unified) ---
+        # After System 1 picks a worker_agent, the router asks the analyzer
+        # for that agent's domain-specific typed decisions. Empty/unset =
+        # disabled; routing works unchanged without it.
+        self.analyzer_url: str = _get("ANALYZER_URL", "").strip()
+        self.analyzer_timeout_s: float = _float("ANALYZER_TIMEOUT_S", 10.0)
         # RLCD feedback loop: set FEEDBACK_ENABLED=false to disable logging
         # of System 2 reviews (e.g. for eval runs you don't want to pollute
         # the training pool).

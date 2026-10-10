@@ -33,6 +33,7 @@ import re
 import time
 
 from .a2a_client import A2AClient
+from .analyzer_client import AnalyzerClient
 from .gemma_client import GemmaReviewer, SystemTwoJudgment
 from .feedback import FeedbackLogger
 from .intents import Intent
@@ -303,6 +304,7 @@ class HybridRouter:
         guardrail_block_score: float = 3.0,
         a2a_client: A2AClient | None = None,
         feedback_logger: FeedbackLogger | None = None,
+        analyzer_client: AnalyzerClient | None = None,
     ) -> None:
         self.system_one = system_one
         self.system_two = system_two
@@ -312,6 +314,9 @@ class HybridRouter:
         self.guardrail_review_score = guardrail_review_score
         self.guardrail_block_score = guardrail_block_score
         self.a2a = a2a_client or A2AClient()
+        # Tier-2 unified intent analyzer (per-agent System 1). None or a
+        # disabled client = routing works exactly as before.
+        self.analyzer = analyzer_client
         # RLCD feedback loop: log every System 2 review for human review
         # and future retraining. None disables it.
         self.feedback = feedback_logger
@@ -454,7 +459,23 @@ class HybridRouter:
         # prefer System 1's worker_agent decision over the intent mapping.
         worker_url = (self.resolve_worker("fallback") if routed
                       else self.resolve_worker_for(s1))
-        dispatch = self.a2a.dispatch(worker_url, text, final_intent)
+        # --- Tier-2: unified intent analyzer (per-agent System 1) ---
+        # Once System 1 has picked a worker_agent, ask the analyzer for
+        # that agent's domain-specific decisions and hand them to the
+        # worker with the dispatch. Skipped for fallback-routed queries;
+        # never blocks routing when the analyzer is down.
+        analyzer_result: dict | None = None
+        if not routed and self.analyzer is not None:
+            analyzer_result = self.analyzer.analyze(
+                text, s1.worker_agent,
+                router_context={
+                    "intent": s1.intent,
+                    "confidence": round(s1.confidence, 3),
+                    "skill_required": s1.skill_required,
+                })
+        dispatch = self.a2a.dispatch(
+            worker_url, text, final_intent,
+            context={"analyzer": analyzer_result} if analyzer_result else None)
 
         return {
             "path": path,  # fast | system2 | guardrail_block | empty
@@ -486,6 +507,8 @@ class HybridRouter:
             "routed_to_fallback": routed,
             "worker": worker_url,
             "worker_name": worker_name_for(worker_url),
+            # --- Tier-2 analyzer decisions for the chosen worker_agent ---
+            "analyzer": analyzer_result,
             "task_id": dispatch["task_id"],
             "dispatch": dispatch,
             "latency_ms": round((time.monotonic() - started) * 1000.0, 1),

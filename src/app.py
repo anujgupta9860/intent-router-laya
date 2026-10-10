@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from .a2a_client import A2AClient
+from .analyzer_client import AnalyzerClient
 from .config import Settings
 from .feedback import FeedbackLogger, feedback_to_dataset
 from .gemma_client import GemmaReviewer
@@ -67,6 +68,10 @@ async def lifespan(app: FastAPI):
         # review + retraining. Disable with FEEDBACK_ENABLED=false.
         feedback_logger=FeedbackLogger(
             enabled=getattr(settings, "feedback_enabled", True)),
+        # Tier-2 unified intent analyzer: disabled unless ANALYZER_URL set.
+        analyzer_client=AnalyzerClient(
+            base_url=settings.analyzer_url,
+            timeout_s=settings.analyzer_timeout_s),
     )
     _state.update(settings=settings, intents=intents, router=router)
     log.info(

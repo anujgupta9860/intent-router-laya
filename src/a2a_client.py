@@ -27,7 +27,8 @@ class A2AClient:
         else:
             log.info("a2a-sdk not installed; using stub dispatch (set pip install a2a-sdk)")
 
-    def _stub_task(self, agent_url: str, text: str, intent: str, reason: str) -> dict:
+    def _stub_task(self, agent_url: str, text: str, intent: str, reason: str,
+                   context: dict | None = None) -> dict:
         task_id = f"task-{uuid.uuid4().hex[:12]}"
         log.info(
             "stub A2A dispatch: task=%s intent=%s agent=%s reason=%s",
@@ -40,9 +41,11 @@ class A2AClient:
             "intent": intent,
             "mode": "stub",
             "reason": reason,
+            "context": context or {},
         }
 
-    def _dispatch_via_sdk(self, agent_url: str, text: str, intent: str) -> dict:
+    def _dispatch_via_sdk(self, agent_url: str, text: str, intent: str,
+                          context: dict | None = None) -> dict:
         # Imported lazily so a missing/broken SDK never breaks module import.
         from a2a.client import A2AClient as _SDKClient  # type: ignore
 
@@ -51,8 +54,12 @@ class A2AClient:
         if send is None:
             raise RuntimeError("installed a2a-sdk client exposes no send_message(); API drift")
         # The SDK accepts an A2A Message; keep the payload minimal and let the
-        # worker's agent card describe its skills.
-        result = send({"text": text, "intent": intent})
+        # worker's agent card describe its skills. The analyzer's Tier-2
+        # decisions ride along as context when present.
+        message: dict = {"text": text, "intent": intent}
+        if context:
+            message["context"] = context
+        result = send(message)
         task_id = getattr(result, "task_id", None) or f"task-{uuid.uuid4().hex[:12]}"
         return {
             "task_id": task_id,
@@ -62,19 +69,25 @@ class A2AClient:
             "mode": "a2a-sdk",
         }
 
-    def dispatch(self, agent_url: str, text: str, intent: str) -> dict:
+    def dispatch(self, agent_url: str, text: str, intent: str,
+                 context: dict | None = None) -> dict:
         """Dispatch a classified query to a worker agent over A2A.
 
-        Returns a dict with at least ``task_id``, ``status``, ``agent_url``,
-        ``intent`` and ``mode`` (``"a2a-sdk"`` or ``"stub"``).
+        ``context`` (optional) carries Tier-2 analyzer decisions to the
+        worker. Returns a dict with at least ``task_id``, ``status``,
+        ``agent_url``, ``intent`` and ``mode`` (``"a2a-sdk"`` or ``"stub"``).
         """
         if self.sdk_available:
             try:
-                return self._dispatch_via_sdk(agent_url, text, intent)
+                return self._dispatch_via_sdk(agent_url, text, intent, context)
             except Exception as exc:  # SDK present but unusable -> stub, loudly
                 log.warning("a2a-sdk dispatch failed (%s); using stub path", exc)
-                return self._stub_task(agent_url, text, intent, reason=f"sdk error: {exc}")
-        return self._stub_task(agent_url, text, intent, reason="a2a-sdk not installed")
+                return self._stub_task(agent_url, text, intent,
+                                       reason=f"sdk error: {exc}",
+                                       context=context)
+        return self._stub_task(agent_url, text, intent,
+                               reason="a2a-sdk not installed",
+                               context=context)
 
     def agent_card(self, agent_url: str) -> dict:
         """Fetch a worker's A2A agent card (stub when SDK is missing)."""
