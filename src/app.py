@@ -64,6 +64,7 @@ async def lifespan(app: FastAPI):
         guardrail_review_score=settings.guardrail_review_score,
         guardrail_block_score=settings.guardrail_block_score,
         a2a_client=A2AClient(),
+        executor=executor,
         # RLCD feedback loop: log every System 2 review for human
         # review + retraining. Disable with FEEDBACK_ENABLED=false.
         feedback_logger=FeedbackLogger(
@@ -76,7 +77,12 @@ async def lifespan(app: FastAPI):
     # Central skill registry: discovers every worker agent's card once,
     # serves the unified catalog at GET /skills.
     from .skill_registry import SkillRegistry
-    _state["skills"] = SkillRegistry(settings.worker_agents)
+    skill_registry = SkillRegistry(settings.worker_agents)
+    _state["skills"] = skill_registry
+    # Execution plane: ADK runs every skill invocation.
+    from .adk_execution import AdkSkillExecutor
+    executor = AdkSkillExecutor(skill_registry=skill_registry)
+    _state["executor"] = executor
     _state.update(settings=settings, intents=intents, router=router)
     log.info(
         "intent-router-laya ready: system1=%s(%s) system2=%s intents=%s",
@@ -144,6 +150,31 @@ def get_skill(name: str):
         raise HTTPException(status_code=404,
                             detail=f"no agent provides skill {name!r}")
     return skill
+
+
+class SkillCallRequest(BaseModel):
+    args: dict = Field(default_factory=dict,
+                       description="skill arguments, e.g. {'order_id': '48291'}")
+    protocol: str = Field(default="auto",
+                          description="mcp | a2a | auto (MCP preferred)")
+
+
+@app.post("/skills/{name}/call")
+def call_skill(name: str, req: SkillCallRequest):
+    """Execute a skill via the ADK execution plane.
+
+    System 1 (or the caller) decides WHAT; ADK executes HOW —
+    MCP tools/call when the providing agent offers it, else A2A.
+    """
+    skill = _skills().find_skill(name)
+    if skill is None:
+        raise HTTPException(status_code=404,
+                            detail=f"no agent provides skill {name!r}")
+    executor = _state.get("executor")
+    if executor is None:
+        raise HTTPException(status_code=503, detail="executor not initialized")
+    return executor.call_skill(name, skill["agent_url"],
+                               args=req.args, protocol=req.protocol)
 
 
 @app.post("/classify")

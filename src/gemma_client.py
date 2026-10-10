@@ -38,7 +38,13 @@ _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 @dataclass
 class SystemTwoJudgment:
-    """System 2's final word on a query (all 11 decisions, 2026-10-08)."""
+    """System 2's read of a query (advisory only).
+
+    ARCHITECTURE: System 2 generates TOKENS (the rationale). It never
+    makes routing decisions — intent, worker_agent, skill_required and
+    escalation are System 1's alone. These fields are logged for RLCD
+    observability but are not consulted by the router.
+    """
     intent: str
     confidence: float
     escalate_to_human: bool
@@ -201,7 +207,9 @@ class GemmaReviewer:
 
     # ------------------------------------------------------------------ API
     def review(self, text: str, s1: SystemOneDecision) -> SystemTwoJudgment:
-        """Make the final call on a query System 1 was unsure about."""
+        """Generate System 2's rationale (tokens) for a query System 1
+        was unsure about. Advisory only — routing decisions stay with
+        System 1."""
         if self.backend == "mock":
             return self._review_mock(text, s1)
         if self.backend == "ollama":

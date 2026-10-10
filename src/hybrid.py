@@ -290,7 +290,8 @@ class SystemOne:
 
 
 class HybridRouter:
-    """Orchestrates System 1 -> policy -> optional System 2 -> A2A dispatch."""
+    """Orchestrates System 1 (all decisions) -> policy ->
+    optional System 2 (tokens only) -> ADK execution."""
 
     def __init__(
         self,
@@ -305,6 +306,7 @@ class HybridRouter:
         a2a_client: A2AClient | None = None,
         feedback_logger: FeedbackLogger | None = None,
         analyzer_client: AnalyzerClient | None = None,
+        executor: object | None = None,
     ) -> None:
         self.system_one = system_one
         self.system_two = system_two
@@ -314,6 +316,12 @@ class HybridRouter:
         self.guardrail_review_score = guardrail_review_score
         self.guardrail_block_score = guardrail_block_score
         self.a2a = a2a_client or A2AClient()
+        # Execution plane: ADK runs every skill invocation. System 1
+        # decides WHAT; the executor handles HOW.
+        if executor is None:
+            from .adk_execution import AdkSkillExecutor
+            executor = AdkSkillExecutor()
+        self.executor = executor
         # Tier-2 unified intent analyzer (per-agent System 1). None or a
         # disabled client = routing works exactly as before.
         self.analyzer = analyzer_client
@@ -440,10 +448,14 @@ class HybridRouter:
                 f"{self.guardrail_block_score}."
             )
         elif path == "system2" and s2 is not None:
-            if s2.escalate_to_human:
+            # ARCHITECTURE: every decision is System 1's. System 2
+            # generates the rationale (tokens) but never overrides a
+            # routing decision. Escalation comes from System 1's
+            # needs_human gate, not from System 2.
+            if s1.needs_human > self.human_review_threshold:
                 intent, routed = "fallback", True
             else:
-                intent, routed = s2.intent, False
+                intent, routed = s1.intent, False
             rationale = s2.rationale
         elif path == "empty":
             intent, routed, rationale = "fallback", True, "empty query"
@@ -473,7 +485,10 @@ class HybridRouter:
                     "confidence": round(s1.confidence, 3),
                     "skill_required": s1.skill_required,
                 })
-        dispatch = self.a2a.dispatch(
+        # --- Execution plane (ADK): System 1 decided WHAT (intent,
+        # worker, skill); ADK executes HOW. The analyzer's Tier-2
+        # decisions ride along in the dispatch context.
+        dispatch = self.executor.dispatch(
             worker_url, text, final_intent,
             context={"analyzer": analyzer_result} if analyzer_result else None)
 
