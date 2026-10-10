@@ -98,8 +98,7 @@ class AnalyzerClient:
             import httpx
             resp = httpx.post(
                 f"{self.base_url}/workflows/identify",
-                json={"query": query, "worker_agent": worker_agent,
-                      "router_context": {}},
+                json={"query": query, "worker_agent": worker_agent},
                 timeout=self.timeout_s,
             )
             resp.raise_for_status()
