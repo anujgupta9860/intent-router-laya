@@ -97,6 +97,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Intent Router (Hybrid: Laya S1 + Gemma S2)", version="0.1.0",
               lifespan=lifespan)
 
+# CORS for the Studio (served from the analyzer domain) calling the
+# skill registry directly.
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["content-type"],
+)
+
 
 class QueryRequest(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
