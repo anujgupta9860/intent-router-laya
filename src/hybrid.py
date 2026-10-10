@@ -585,6 +585,8 @@ class HybridRouter:
     def _run_workflow_step(self, text: str, st, s1, session_id: str,
                            reason: str, wf_decision: dict | None,
                            *, started: float) -> dict:
+        # Remember every user message in the session.
+        st.messages.append(text)
         step = self.workflows.current_step(st)
         missing = self.workflows.missing_slots(st)
         worker_url = self.resolve_worker_for(s1)
@@ -617,7 +619,10 @@ class HybridRouter:
             "session": {"task_id": f"wf-{st.workflow_name}-{step['id']}",
                         "slots": st.slots, "action": step["action"],
                         "workflow": st.workflow_name,
-                        "step": step["id"]},
+                        "step": step["id"],
+                        # full message history so the worker can extract
+                        # domain slots (e.g. items) from earlier turns
+                        "messages": st.messages},
         }
         dispatch = self.executor.dispatch(worker_url, text, s1.intent,
                                           context=context)

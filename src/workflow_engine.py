@@ -60,6 +60,7 @@ class WorkflowState:
     current_step_id: str
     slots: dict = field(default_factory=dict)   # stored user details
     step_history: list = field(default_factory=list)
+    messages: list = field(default_factory=list)  # all user messages in session
     # Lifecycle: started → inprogress → completed | aborted
     state: str = "started"
 
@@ -74,6 +75,7 @@ class WorkflowState:
             "current_step": self.current_step_id,
             "slots": self.slots,
             "steps_done": [h["step"] for h in self.step_history],
+            "messages": len(self.messages),
         }
 
 
