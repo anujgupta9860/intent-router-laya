@@ -75,19 +75,46 @@ class A2AClient:
 
         ``context`` (optional) carries Tier-2 analyzer decisions to the
         worker. Returns a dict with at least ``task_id``, ``status``,
-        ``agent_url``, ``intent`` and ``mode`` (``"a2a-sdk"`` or ``"stub"``).
+        ``agent_url``, ``intent`` and ``mode`` (``"a2a-sdk"``,
+        ``"http"`` or ``"stub"``).
         """
         if self.sdk_available:
             try:
                 return self._dispatch_via_sdk(agent_url, text, intent, context)
-            except Exception as exc:  # SDK present but unusable -> stub, loudly
-                log.warning("a2a-sdk dispatch failed (%s); using stub path", exc)
-                return self._stub_task(agent_url, text, intent,
-                                       reason=f"sdk error: {exc}",
-                                       context=context)
+            except Exception as exc:  # SDK present but unusable -> HTTP, loudly
+                log.warning("a2a-sdk dispatch failed (%s); trying HTTP", exc)
+        # HTTP fallback: POST the message to the worker's /message endpoint.
+        # This is how a deployed router reaches a live worker agent without
+        # the a2a-sdk installed.
+        try:
+            return self._dispatch_via_http(agent_url, text, intent, context)
+        except Exception as exc:
+            log.warning("HTTP dispatch to %s failed (%s); using stub",
+                        agent_url, exc)
         return self._stub_task(agent_url, text, intent,
-                               reason="a2a-sdk not installed",
+                               reason="a2a-sdk not installed and HTTP "
+                                      "dispatch failed",
                                context=context)
+
+    def _dispatch_via_http(self, agent_url: str, text: str, intent: str,
+                           context: dict | None = None) -> dict:
+        """POST {"text","intent","context"} to the worker's /message."""
+        import httpx
+
+        url = agent_url.rstrip("/") + "/message"
+        payload = {"text": text, "intent": intent,
+                   "context": context or {}}
+        resp = httpx.post(url, json=payload, timeout=30.0)
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "task_id": data.get("task_id", f"task-{uuid.uuid4().hex[:12]}"),
+            "status": data.get("status", "completed"),
+            "agent_url": agent_url,
+            "intent": intent,
+            "mode": "http",
+            "result": data,
+        }
 
     def agent_card(self, agent_url: str) -> dict:
         """Fetch a worker's A2A agent card (stub when SDK is missing)."""
