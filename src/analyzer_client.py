@@ -57,3 +57,54 @@ class AnalyzerClient:
             log.warning("unified analyzer call failed (%s); continuing "
                         "without analyzer decisions", exc)
             return None
+
+    def decide_at_workflow(self, query: str, worker_agent: str,
+                           workflow: str,
+                           router_context: dict | None = None) -> dict | None:
+        """Analyzer at workflow level: /decide with the workflow set.
+
+        Returns analyzer output + policy decision + workflow definition.
+        Never raises (None on failure).
+        """
+        if not self.enabled:
+            return None
+        try:
+            import httpx
+        except ImportError:
+            return None
+        try:
+            resp = httpx.post(
+                f"{self.base_url}/decide",
+                json={
+                    "query": query,
+                    "worker_agent": worker_agent,
+                    "router_context": router_context or {},
+                    "workflow": workflow,
+                },
+                timeout=self.timeout_s,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as exc:
+            log.warning("workflow-level decide failed (%s)", exc)
+            return None
+
+    def identify_workflow(self, query: str,
+                          worker_agent: str) -> dict | None:
+        """System 1's workflow decision via the analyzer service."""
+        if not self.enabled:
+            return None
+        try:
+            import httpx
+            resp = httpx.post(
+                f"{self.base_url}/workflows/identify",
+                json={"query": query, "worker_agent": worker_agent,
+                      "router_context": {}},
+                timeout=self.timeout_s,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("definition")
+        except Exception as exc:
+            log.warning("workflow identify failed (%s)", exc)
+            return None

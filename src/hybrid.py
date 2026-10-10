@@ -333,6 +333,12 @@ class HybridRouter:
         # active task's locked intent carries the turn with no System 1.
         from .task_manager import TaskManager
         self.tasks = TaskManager()
+        # Workflow engine (2026-10-10): agent → workflow → analyzer
+        # (workflow level) → decision mechanism → steps. Definitions
+        # come from the analyzer service (hot-reloaded, Studio-edited).
+        from .workflow_engine import WorkflowEngine
+        analyzer_base = getattr(analyzer_client, "base_url", "") or ""
+        self.workflows = WorkflowEngine(analyzer_base)
         # worker_agent ("billing", "support", ...) -> worker URL, derived
         # from the intent taxonomy's worker: mapping and the intent->URL map.
         self._worker_agent_urls: dict[str, str] = {}
@@ -362,9 +368,22 @@ class HybridRouter:
         session_id = session_id or f"ses-{uuid.uuid4().hex[:8]}"
 
         # --- Decision gate (deterministic; no System 1 here) ---
-        # If a task is already active and this message continues it
-        # (slot fill, recovery, abort), the locked intent carries the
-        # turn and System 1 is NOT invoked.
+        # Layer 1: active workflow? Continue its current step with
+        # stored slots, or abort/switch.
+        wf_state = self.workflows.get_state(session_id)
+        if wf_state is not None:
+            need_wf, wf_reason = self.workflows.needs_workflow_decision(
+                text, wf_state)
+            if not need_wf:
+                if wf_reason == "workflow_abort":
+                    return self._abort_workflow(text, wf_state, session_id,
+                                               started=started)
+                return self._continue_workflow(text, wf_state, wf_reason,
+                                               session_id, started=started)
+            # Switch/abort fall through to a fresh decision below.
+            self.workflows.abort(session_id)
+
+        # Layer 2: active single task? Locked intent carries the turn.
         task = self.tasks.get_task(session_id)
         need, reason = self.tasks.needs_decision(text, task)
         if not need:
@@ -384,6 +403,17 @@ class HybridRouter:
             return self._respond(
                 text, s1, None, path="guardrail_block", started=started,
             )
+
+        # --- System 1, decision 2: workflow or single task? ---
+        # The analyzer service identifies the workflow (trigger match
+        # until the Laya workflow head is trained). A workflow means:
+        # analyze at workflow level, then run its steps deterministically.
+        wf_def = None
+        if self.analyzer is not None and self.analyzer.enabled:
+            wf_def = self.analyzer.identify_workflow(text, s1.worker_agent)
+        if wf_def is not None:
+            return self._start_workflow(text, s1, wf_def, session_id,
+                                        reason, started=started)
 
         fast_path = (
             s1.confidence >= self.confidence_threshold
@@ -527,6 +557,144 @@ class HybridRouter:
             "worker": task.worker_agent,
             "dispatch": dispatch,
             "answer": result.get("message"),
+            "latency_ms": round((time.monotonic() - started) * 1000.0, 1),
+            "ts": time.time(),
+        }
+
+    # -------------------------------------------------- workflow level
+    def _start_workflow(self, text: str, s1, wf_def: dict,
+                        session_id: str, reason: str,
+                        *, started: float) -> dict:
+        """System 1 identified agent + workflow. Now: analyze at
+        workflow level, then run the first step as a locked task."""
+        # Analyzer at workflow level: /decide with the workflow set.
+        wf_decision = None
+        if self.analyzer is not None and self.analyzer.enabled:
+            wf_decision = self.analyzer.decide_at_workflow(
+                text, s1.worker_agent, wf_def["name"],
+                router_context={"intent": s1.intent,
+                                "confidence": round(s1.confidence, 3)})
+        # Start the workflow session; store any details from this message.
+        st = self.workflows.start(session_id, wf_def)
+        self.workflows.store_slots(session_id, text)
+        return self._run_workflow_step(text, st, s1, session_id, reason,
+                                       wf_decision, started=started)
+
+    def _run_workflow_step(self, text: str, st, s1, session_id: str,
+                           reason: str, wf_decision: dict | None,
+                           *, started: float) -> dict:
+        step = self.workflows.current_step(st)
+        missing = self.workflows.missing_slots(st)
+        worker_url = self.resolve_worker_for(s1)
+        if missing:
+            # Step can't run yet — ask for the missing detail and wait.
+            # Still no System 1: the workflow owns this turn.
+            return {
+                "path": "workflow",
+                "intent": s1.intent,
+                "system1_intent": s1.intent,
+                "system1_workflow": st.workflow_name,
+                "session_id": session_id,
+                "decision_made": True,
+                "decision_reason": reason,
+                "workflow": st.to_dict(),
+                "task": None,
+                "worker": worker_url,
+                "workflow_decision": (wf_decision or {}).get("decision"),
+                "answer": (f"To continue '{st.workflow_name}' I need: "
+                           f"{', '.join(missing)}."),
+                "needs_slots": missing,
+                "dispatch": None,
+                "latency_ms": round((time.monotonic() - started) * 1000.0, 1),
+                "ts": time.time(),
+            }
+        # All slots filled — execute the step as a locked task.
+        self.workflows.begin_step(session_id)  # started → inprogress
+        context = {
+            "analyzer": {"order_action": step["action"]},
+            "session": {"task_id": f"wf-{st.workflow_name}-{step['id']}",
+                        "slots": st.slots, "action": step["action"],
+                        "workflow": st.workflow_name,
+                        "step": step["id"]},
+        }
+        dispatch = self.executor.dispatch(worker_url, text, s1.intent,
+                                          context=context)
+        result = dispatch.get("result", {})
+        status = result.get("status")
+        # Merge worker-returned slots (e.g. items the worker parsed).
+        worker_slots = (result.get("data") or {}).get("slots")
+        if worker_slots:
+            self.workflows.store_slots(session_id, "", extra=worker_slots)
+        if status == "completed":
+            transition = self.workflows.advance(session_id, "success")
+        elif status == "needs_input":
+            # Step is waiting on the user — workflow stays active.
+            transition = f"next:{step['id']}"
+        else:
+            transition = self.workflows.advance(session_id, "failure")
+        fresh = self.workflows.get_state(session_id)
+        return {
+            "path": "workflow",
+            "intent": s1.intent,
+            "system1_intent": s1.intent,
+            "system1_workflow": st.workflow_name,
+            "session_id": session_id,
+            "decision_made": True,
+            "decision_reason": reason,
+            "workflow": fresh.to_dict() if fresh else st.to_dict(),
+            "workflow_step": step["id"],
+            "workflow_transition": transition,
+            "task": None,
+            "worker": worker_url,
+            "workflow_decision": (wf_decision or {}).get("decision"),
+            "dispatch": dispatch,
+            "answer": result.get("message"),
+            "latency_ms": round((time.monotonic() - started) * 1000.0, 1),
+            "ts": time.time(),
+        }
+
+    def _continue_workflow(self, text: str, st, reason: str,
+                           session_id: str, *, started: float) -> dict:
+        """A turn inside an active workflow: store details, run/await
+        the current step. System 1 is NOT consulted."""
+        # Store whatever details the user just gave.
+        self.workflows.store_slots(session_id, text)
+        # Re-resolve the worker from the stored definition's agent.
+        worker_url = self._worker_agent_urls.get(
+            st.definition.get("agent"), next(iter(self.worker_agents.values())))
+        # Build a minimal s1-like namespace for _run_workflow_step.
+        s1 = type("S1", (), {"intent": "order_status",
+                             "confidence": 1.0,
+                             "worker_agent": st.definition.get("agent")})()
+        # If the message looks like a new workflow trigger for a
+        # DIFFERENT workflow → switch: abort and re-identify.
+        new_wf = None
+        if self.analyzer is not None and self.analyzer.enabled:
+            new_wf = self.analyzer.identify_workflow(
+                text, st.definition.get("agent", ""))
+        if new_wf and new_wf["name"] != st.workflow_name:
+            self.workflows.abort(session_id)
+            return self._start_workflow(text, s1, new_wf, session_id,
+                                        "workflow_switch", started=started)
+        return self._run_workflow_step(text, st, s1, session_id, reason,
+                                       None, started=started)
+
+    def _abort_workflow(self, text: str, st, session_id: str,
+                        *, started: float) -> dict:
+        """User aborted the workflow → clear it. The next message
+        starts identifying a new workflow from scratch."""
+        self.workflows.abort(session_id)
+        return {
+            "path": "workflow_abort",
+            "intent": None,
+            "system1_intent": None,  # System 1 was NOT consulted
+            "session_id": session_id,
+            "decision_made": False,
+            "decision_reason": "workflow_abort",
+            "workflow": {"workflow": st.workflow_name, "state": "aborted"},
+            "answer": (f"OK, I've cancelled the '{st.workflow_name}' "
+                       f"workflow. What would you like to do?"),
+            "dispatch": None,
             "latency_ms": round((time.monotonic() - started) * 1000.0, 1),
             "ts": time.time(),
         }
