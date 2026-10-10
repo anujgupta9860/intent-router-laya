@@ -600,3 +600,97 @@ curl -s -X POST $BASE/skills/track_order/call \
   card and MCP tools without redeploy; the registry re-discovers.
 - First `/route` after a deploy takes ~60 s (ADK import + analyzer cold
   start); consider a startup warmup probe.
+
+## 16. System 1 owns all three decisions + unified Studio (2026-10-10)
+
+### 16.1 The decision pipeline (final)
+
+```
+end user ──POST /route──▶ ROUTER
+                           │
+              ┌────────────┴────────────┐
+              │ DECISION GATE           │
+              │ active task/workflow?   │
+              │  yes → locked intent    │  (no System 1)
+              │  no  → System 1         │  (fresh decision)
+              └────────────┬────────────┘
+                           ▼
+              System 1, decision 1: AGENT
+              (which worker agent — billing/orders/...)
+                           │
+                           ▼
+              System 1, decision 2: WORKFLOW
+              (which workflow, or None = single task)
+              [SystemOne.select_workflow()]
+                           │
+              ┌────────────┴────────────┐
+              │ workflow?               │
+              │  no → analyzer /decide  │
+              │       → action → skill  │  (single task)
+              │  yes → workflow engine  │
+              └────────────┬────────────┘
+                           ▼
+              WORKFLOW: multi-turn slot filling FIRST
+              (every required slot collected across turns,
+               stored per-session, never overwritten)
+                           │
+                           ▼
+              System 1, decision 3: SKILL
+              (which skill, AFTER slots filled)
+              [SystemOne.select_skill()]
+                           │
+                           ▼
+              ADK executes the skill (MCP preferred, A2A fallback)
+              Deterministic step transitions:
+              started → inprogress → completed | aborted
+```
+
+Rules:
+- System 1 makes ALL decisions (agent, workflow, skill). System 2
+  generates tokens only (rationales) and can never override.
+- The step's YAML `action` is a HINT, not the decision — System 1
+  resolves it against the live skill registry.
+- Slot filling always precedes skill selection within a step.
+- Responses carry provenance: `workflow_selected_by: "system1"`,
+  `skill_selected_by: "system1"`, `decision_made`, `decision_reason`.
+
+### 16.2 Current backends (until trained heads land)
+
+| Decision | Interface | Current backend |
+|----------|-----------|-----------------|
+| agent | `SystemOne.decide()` | mock / Laya / encoder |
+| workflow | `SystemOne.select_workflow()` | analyzer `/workflows/identify` (trigger match) |
+| skill | `SystemOne.select_skill()` | skill-registry resolution of step hint |
+
+Each backend swap is a method-body change only — the router code
+calling it does not change. This is what makes the "all decisions
+are System 1" claim structural rather than aspirational: the
+decision FLOWS through System 1 even before the trained head exists.
+
+### 16.3 Unified Studio (single URL, all agents)
+
+https://intent-analyzer-7yydsv7ybq-uc.a.run.app/studio
+
+Three tabs, one control plane:
+1. **Decision Tree** — policy rules across all agents (CRUD + live test).
+2. **Workflows** — all workflow definitions (CRUD + test identify).
+3. **Skills** — every skill from every agent (agent chip, A2A/MCP
+   badges, stale indicator, agent filter, registry refresh,
+   live test-calls through the ADK execution plane).
+
+The Skills tab reads the router's `GET /skills` directly (CORS
+enabled on the router). New agents appear automatically — no Studio
+changes needed. Skills are still DEFINED per-agent (`skills.yaml`);
+Studio-side definition editing would need a per-agent write API
+(not built).
+
+### 16.4 Decision tree vs workflows (documented design)
+
+The decision tree (`policy/decision-tree.yaml`) handles SINGLE-TASK
+actions only. It has no workflow references by design — workflow
+selection is System 1's decision and must not be split across two
+systems. When `/decide` is called with a workflow, the tree ignores
+it and the response attaches the workflow definition for the
+router's engine. Future: per-step policy refinement (tree picks
+between skill variants within a step) when a step needs conditional
+behavior.
