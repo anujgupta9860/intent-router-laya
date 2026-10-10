@@ -460,14 +460,15 @@ class HybridRouter:
                     usable_label=not s2.escalate_to_human,
                 )
 
-        resp = self._respond(text, s1, s2, path="fast" if fast_path else "system2",
+        resp_path = "fast" if fast_path else "system2"
+        resp = self._respond(text, s1, s2, path=resp_path,
                              started=started)
         resp["session_id"] = session_id
         resp["decision_made"] = True
         resp["decision_reason"] = reason
         # A fresh decision starts a task (unless it was blocked or fell
         # back — those carry no actionable intent to lock).
-        if path not in ("guardrail_block", "empty") and not resp.get(
+        if resp_path not in ("guardrail_block", "empty") and not resp.get(
                 "routed_to_fallback"):
             action = (resp.get("analyzer") or {}).get("order_action")
             new_task = self.tasks.start_task(
