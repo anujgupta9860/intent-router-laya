@@ -55,6 +55,16 @@ async def lifespan(app: FastAPI):
         vertex_region=settings.vertex_region,
         vertex_endpoint_id=settings.vertex_endpoint_id,
     )
+    # Central skill registry: discovers every worker agent's card once,
+    # serves the unified catalog at GET /skills.
+    from .skill_registry import SkillRegistry
+    skill_registry = SkillRegistry(settings.worker_agents)
+    _state["skills"] = skill_registry
+    # Execution plane: ADK runs every skill invocation. System 1 decides
+    # WHAT; the executor handles HOW.
+    from .adk_execution import AdkSkillExecutor
+    executor = AdkSkillExecutor(skill_registry=skill_registry)
+    _state["executor"] = executor
     router = HybridRouter(
         system_one,
         system_two,
@@ -74,15 +84,6 @@ async def lifespan(app: FastAPI):
             base_url=settings.analyzer_url,
             timeout_s=settings.analyzer_timeout_s),
     )
-    # Central skill registry: discovers every worker agent's card once,
-    # serves the unified catalog at GET /skills.
-    from .skill_registry import SkillRegistry
-    skill_registry = SkillRegistry(settings.worker_agents)
-    _state["skills"] = skill_registry
-    # Execution plane: ADK runs every skill invocation.
-    from .adk_execution import AdkSkillExecutor
-    executor = AdkSkillExecutor(skill_registry=skill_registry)
-    _state["executor"] = executor
     _state.update(settings=settings, intents=intents, router=router)
     log.info(
         "intent-router-laya ready: system1=%s(%s) system2=%s intents=%s",
