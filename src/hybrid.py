@@ -42,6 +42,7 @@ from .laya_client import (
     LayaClient,
     LayaError,
     SystemOneDecision,
+    WorkflowDecision,
 )
 from .router_util import worker_name_for
 
@@ -289,6 +290,42 @@ class SystemOne:
             )
 
 
+    def select_workflow(self, text: str, worker_agent: str,
+                        analyzer=None) -> WorkflowDecision:
+        """System 1, decision 2: workflow or single task?
+
+        Workflow selection is a DECISION, so it lives in System 1 —
+        the router never identifies workflows around it.
+
+        Current backend: the analyzer service's /workflows/identify
+        (trigger matching until the Laya workflow head is trained).
+        A trained head replaces the body of this method; the router
+        code calling it does not change.
+        """
+        import time
+        started = time.monotonic()
+        wf_def = None
+        model = "system1-workflow"
+        if analyzer is not None and getattr(analyzer, "enabled", False):
+            try:
+                wf_def = analyzer.identify_workflow(text, worker_agent)
+                model = "system1-workflow/analyzer"
+            except Exception as exc:
+                log.error("System 1 workflow selection failed: %s", exc)
+        latency_ms = (time.monotonic() - started) * 1000.0
+        if wf_def is None:
+            return WorkflowDecision(workflow=None, confidence=0.0,
+                                    definition=None, model=model,
+                                    latency_ms=latency_ms)
+        return WorkflowDecision(
+            workflow=wf_def.get("name"),
+            confidence=0.9,  # trigger match; the head will emit real scores
+            definition=wf_def,
+            model=model,
+            latency_ms=latency_ms,
+        )
+
+
 class HybridRouter:
     """Orchestrates System 1 (all decisions) -> policy ->
     optional System 2 (tokens only) -> ADK execution."""
@@ -405,15 +442,14 @@ class HybridRouter:
             )
 
         # --- System 1, decision 2: workflow or single task? ---
-        # The analyzer service identifies the workflow (trigger match
-        # until the Laya workflow head is trained). A workflow means:
-        # analyze at workflow level, then run its steps deterministically.
-        wf_def = None
-        if self.analyzer is not None and self.analyzer.enabled:
-            wf_def = self.analyzer.identify_workflow(text, s1.worker_agent)
-        if wf_def is not None:
-            return self._start_workflow(text, s1, wf_def, session_id,
-                                        reason, started=started)
+        # Workflow selection is a DECISION — it goes through System 1,
+        # never around it. (Current backend: analyzer trigger matching
+        # until the Laya workflow head is trained.)
+        wf_decision = self.system_one.select_workflow(
+            text, s1.worker_agent, self.analyzer)
+        if wf_decision.workflow is not None:
+            return self._start_workflow(text, s1, wf_decision.definition,
+                                        session_id, reason, started=started)
 
         fast_path = (
             s1.confidence >= self.confidence_threshold
@@ -599,6 +635,7 @@ class HybridRouter:
                 "intent": s1.intent,
                 "system1_intent": s1.intent if decision_made else None,
                 "system1_workflow": st.workflow_name,
+                "workflow_selected_by": "system1",
                 "session_id": session_id,
                 "decision_made": decision_made,
                 "decision_reason": reason,
@@ -646,6 +683,7 @@ class HybridRouter:
             "intent": s1.intent,
             "system1_intent": s1.intent if decision_made else None,
             "system1_workflow": st.workflow_name,
+            "workflow_selected_by": "system1",
             "session_id": session_id,
             "decision_made": decision_made,
             "decision_reason": reason,
@@ -676,15 +714,16 @@ class HybridRouter:
                              "worker_agent": st.definition.get("agent")})()
         # Switch detection: only re-identify when the message does NOT
         # fill a missing slot — a slot fill is a continuation, not a
-        # new goal.
+        # new goal. Re-identification also goes through System 1.
         from .workflow_engine import extract_slots as _extract
         missing = self.workflows.missing_slots(st)
         fills = [s for s in _extract(text) if s in missing]
         new_wf = None
-        if not fills and self.analyzer is not None and \
-                self.analyzer.enabled:
-            new_wf = self.analyzer.identify_workflow(
-                text, st.definition.get("agent", ""))
+        if not fills:
+            switch_decision = self.system_one.select_workflow(
+                text, st.definition.get("agent", ""), self.analyzer)
+            if switch_decision.definition is not None:
+                new_wf = switch_decision.definition
         if new_wf and new_wf["name"] != st.workflow_name:
             self.workflows.abort(session_id)
             return self._start_workflow(text, s1, new_wf, session_id,

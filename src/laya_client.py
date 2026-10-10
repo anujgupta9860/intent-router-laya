@@ -73,6 +73,23 @@ _SKILLS = set(SKILL_DESCRIPTIONS)
 
 
 @dataclass
+class WorkflowDecision:
+    """System 1's second decision: which workflow, or None for a
+    single task.
+
+    Selecting a workflow IS a decision, so it flows through System 1 —
+    never around it. The current backend is the analyzer service's
+    /workflows/identify; a trained Laya workflow head drops in here
+    without changing the router.
+    """
+    workflow: str | None = None   # workflow name, or None = single task
+    confidence: float = 0.0
+    definition: dict | None = None  # full workflow definition if selected
+    model: str = ""               # backend that made the call
+    latency_ms: float = 0.0
+
+
+@dataclass
 class SystemOneDecision:
     """Everything System 1 decided about one query."""
     intent: str
