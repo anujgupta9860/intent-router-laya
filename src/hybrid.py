@@ -328,6 +328,11 @@ class HybridRouter:
         # RLCD feedback loop: log every System 2 review for human review
         # and future retraining. None disables it.
         self.feedback = feedback_logger
+        # Task framework (2026-10-10): System 1 is invoked ONLY when the
+        # decision gate says a genuine decision is needed. Otherwise the
+        # active task's locked intent carries the turn with no System 1.
+        from .task_manager import TaskManager
+        self.tasks = TaskManager()
         # worker_agent ("billing", "support", ...) -> worker URL, derived
         # from the intent taxonomy's worker: mapping and the intent->URL map.
         self._worker_agent_urls: dict[str, str] = {}
@@ -351,9 +356,21 @@ class HybridRouter:
             return url
         return self.resolve_worker(s1.intent)
 
-    def handle_query(self, text: str) -> dict:
+    def handle_query(self, text: str, session_id: str | None = None) -> dict:
         started = time.monotonic()
         text = (text or "").strip()
+        session_id = session_id or f"ses-{uuid.uuid4().hex[:8]}"
+
+        # --- Decision gate (deterministic; no System 1 here) ---
+        # If a task is already active and this message continues it
+        # (slot fill, recovery, abort), the locked intent carries the
+        # turn and System 1 is NOT invoked.
+        task = self.tasks.get_task(session_id)
+        need, reason = self.tasks.needs_decision(text, task)
+        if not need:
+            return self._continue_task(text, task, reason, session_id,
+                                       started=started)
+
         if not text:
             return self._respond(
                 text, self._empty_system_one(), None,
@@ -413,8 +430,106 @@ class HybridRouter:
                     usable_label=not s2.escalate_to_human,
                 )
 
-        return self._respond(text, s1, s2, path="fast" if fast_path else "system2",
+        resp = self._respond(text, s1, s2, path="fast" if fast_path else "system2",
                              started=started)
+        resp["session_id"] = session_id
+        resp["decision_made"] = True
+        resp["decision_reason"] = reason
+        # A fresh decision starts a task (unless it was blocked or fell
+        # back — those carry no actionable intent to lock).
+        if path not in ("guardrail_block", "empty") and not resp.get(
+                "routed_to_fallback"):
+            action = (resp.get("analyzer") or {}).get("order_action")
+            new_task = self.tasks.start_task(
+                session_id, resp["intent"], resp["worker"],
+                action=action, slots=self._extract_slots(text))
+            self._update_task_from_result(new_task, resp)
+            resp["task"] = new_task.to_dict()
+        else:
+            resp["task"] = None
+        return resp
+
+    # ------------------------------------------------------ task framework
+    # Required slots per worker action. The worker stays the source of
+    # truth for what it needs; this is the router's local copy so it can
+    # track pending slots without another round-trip.
+    ACTION_REQUIRED_SLOTS = {
+        "track": ["order_id"], "cancel": ["order_id"],
+        "modify": ["order_id"], "return": ["order_id"],
+        "reorder": ["order_id"], "estimate": ["order_id"],
+        "place": ["items", "address"], "list": [], "order_info": [],
+    }
+
+    @staticmethod
+    def _extract_slots(text: str) -> dict:
+        from .task_manager import SLOT_PATTERNS
+        slots: dict = {}
+        for name, pattern in SLOT_PATTERNS.items():
+            m = pattern.search(text or "")
+            if m:
+                slots[name] = m.group(1)
+        return slots
+
+    def _fill_slots(self, text: str, task) -> None:
+        for name, value in self._extract_slots(text).items():
+            task.slots[name] = value
+
+    def _update_task_from_result(self, task, resp: dict) -> None:
+        status = (resp.get("dispatch") or {}).get("result", {}).get("status")
+        if status == "completed":
+            self.tasks.complete_task(task.session_id)
+        elif status == "needs_input":
+            required = self.ACTION_REQUIRED_SLOTS.get(task.action or "", [])
+            task.pending_slots = [s for s in required
+                                  if s not in task.slots]
+            # stays active — the next turn continues it without System 1
+
+    def _continue_task(self, text: str, task, reason: str,
+                       session_id: str, *, started: float) -> dict:
+        """A turn that needs no decision: locked intent, no System 1."""
+        if reason == "task_control_abort":
+            aborted = self.tasks.abort_task(session_id)
+            return {
+                "path": "task_continuation",
+                "intent": task.intent,
+                "system1_intent": None,  # System 1 was NOT consulted
+                "session_id": session_id,
+                "decision_made": False,
+                "decision_reason": reason,
+                "task": aborted.to_dict() if aborted else None,
+                "answer": "Got it — I've dropped that. "
+                          "What would you like to do?",
+                "dispatch": None,
+                "latency_ms": round((time.monotonic() - started) * 1000.0, 1),
+                "ts": time.time(),
+            }
+        self._fill_slots(text, task)
+        # The worker gets the locked action + session slots; no analyzer
+        # call — there is nothing new to decide.
+        context: dict = {
+            "session": {"task_id": task.task_id, "slots": task.slots,
+                        "action": task.action},
+        }
+        if task.action:
+            context["analyzer"] = {"order_action": task.action}
+        dispatch = self.executor.dispatch(task.worker_agent, text,
+                                          task.intent, context=context)
+        self._update_task_from_result(task, {"dispatch": dispatch})
+        result = dispatch.get("result", {})
+        return {
+            "path": "task_continuation",
+            "intent": task.intent,
+            "system1_intent": None,  # System 1 was NOT consulted
+            "session_id": session_id,
+            "decision_made": False,
+            "decision_reason": reason,
+            "task": task.to_dict(),
+            "worker": task.worker_agent,
+            "dispatch": dispatch,
+            "answer": result.get("message"),
+            "latency_ms": round((time.monotonic() - started) * 1000.0, 1),
+            "ts": time.time(),
+        }
 
     # -------------------------------------------------------------- internals
     def _empty_system_one(self) -> SystemOneDecision:

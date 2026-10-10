@@ -100,6 +100,7 @@ app = FastAPI(title="Intent Router (Hybrid: Laya S1 + Gemma S2)", version="0.1.0
 
 class QueryRequest(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
+    session_id: str | None = None
 
 
 def _router() -> HybridRouter:
@@ -222,7 +223,7 @@ def classify(req: QueryRequest):
 
 @app.post("/route")
 def route(req: QueryRequest):
-    return _router().handle_query(req.text)
+    return _router().handle_query(req.text, session_id=req.session_id)
 
 
 # ---------------------------------------------------------------- RLCD loop
