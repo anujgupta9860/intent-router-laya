@@ -457,3 +457,146 @@ curl -s $BASE/rlcd/train/7b2e9a1c4f03 | python3 -m json.tool
  "out_dir": "models/laya_rlcd_v2", "epochs": 4.0, "status": "running",
  "created_ts": 1791489000.0, "started_ts": 1791489001.5}
 ```
+
+## 15. End-to-end live system: router + analyzer + order agent on Cloud Run (2026-10-10)
+
+Everything below is deployed and live-verified in GCP project
+`innovation-lab-2026` (region `us-central1`).
+
+### 15.1 Architecture: who does what
+
+```
+                        ┌─────────────────────────────────┐
+ end user ──POST /route─▶│  INTENT ROUTER (Cloud Run)       │
+   {"text": "..."}       │                                 │
+                         │  System 1 (Laya/mock): EVERY    │
+                         │  decision — intent, worker_     │
+                         │  agent, skill, needs_human,     │
+                         │  guardrail (typed outputs only) │
+                         │         │                       │
+                         │         ▼                       │
+                         │  System 2 (Gemma/mock): TOKENS  │
+                         │  ONLY — rationale text. Never   │
+                         │  overrides a decision.          │
+                         │         │                       │
+                         │         ▼                       │
+                         │  ADK execution plane:           │
+                         │  AdkSkillExecutor runs every    │
+                         │  skill as an ADK FunctionTool   │
+                         │  (run_async + ToolContext).     │
+                         │  MCP preferred when offered.    │
+                         └────────┬────────────────────────┘
+                                  │ Tier-2: POST /analyze
+                                  ▼
+                         ┌─────────────────────────────────┐
+                         │  UNIFIED INTENT ANALYZER        │
+                         │  (Cloud Run, 1 checkpoint,      │
+                         │   5 agents) → per-agent Choice  │
+                         │  + Noul decisions               │
+                         └────────┬────────────────────────┘
+                                  │ Tier-2.5: POST /decide
+                                  ▼ (policy tree → action)
+                         ┌─────────────────────────────────┐
+                         │  ORDER AGENT (Cloud Run)        │
+                         │  A2A: POST /message             │
+                         │  MCP: POST /mcp (7 tools)       │
+                         │  skills: track/cancel/modify/   │
+                         │  return/reorder/place/list/     │
+                         │  estimate                       │
+                         └─────────────────────────────────┘
+```
+
+The rule, enforced in code (`hybrid.py`, `gemma_client.py`,
+`adk_execution.py`):
+
+- **System 1 decides.** Laya typed decisions (Choice/Noul/Score) are the
+  only source of routing truth. System 2 cannot override intent, worker,
+  skill, or escalation — verified by unit test.
+- **System 2 generates.** Gemma produces rationale text only. No
+  decision fields are consulted for routing.
+- **ADK executes.** `AdkSkillExecutor` wraps every skill call as an ADK
+  `FunctionTool`; dispatch modes are `adk-a2a` and `adk-mcp`.
+
+### 15.2 Live services
+
+| Service | URL | Notes |
+|---|---|---|
+| intent-router | https://intent-router-1031371624665.us-central1.run.app | `ANALYZER_URL` → analyzer; `WORKER_AGENTS_JSON` → order agent |
+| intent-analyzer | https://intent-analyzer-7yydsv7ybq-uc.a.run.app | 596 MB unified checkpoint from `gs://laya-checkpoints-anuj/intent-analyzer-unified/unified/`; 4 GiB RAM |
+| order-agent | https://order-agent-1031371624665.us-central1.run.app | A2A + MCP; in-memory order store |
+
+Images: `us-central1-docker.pkg.dev/innovation-lab-2026/{laya-router,intent-analyzer,order-agent}/*:latest`
+(Artifact Registry repos created 2026-10-10).
+
+### 15.3 Unified intent analyzer (Tier 2)
+
+Repo: `intent-analyzer-unified` (public GitHub). One shared-encoder
+checkpoint, per-agent Choice+Noul heads; `POST /analyze` takes
+`worker_agent` + `query`. 5-epoch full training 2026-10-09: 1.000/1.000
+Choice/Noul on all five agents.
+
+**Decision framework** (layman-configurable, same repo):
+`policy/decision-tree.yaml` — human-readable first-match-wins rules;
+`POST /decide` = analyzer + policy → `{action, worker, risk}` for A2A
+dispatch. Decision Tree Studio at `/studio` (rule editor with
+valid-value dropdowns + live test panel). Hot-reload: the file is
+re-checked on every decision; broken edits keep the last good tree
+(error in `GET /policy/status`); `ANALYZER_POLICY_PATH` env override
+for mounted volumes.
+
+### 15.4 Order agent (A2A worker + mock MCP server)
+
+Repo: `~/workspace/order-agent` (local only, not yet on GitHub).
+`GET /.well-known/agent-card.json`, `POST /message`
+(`{text, intent, context:{analyzer}}`), `GET /health`.
+Mock order DB (`src/orders_db.py`) — swap for a real orders API.
+Confidence-gated analyzer override: analyzer confidence < 0.8 falls
+back to the agent's text inference (handles requests outside the
+analyzer's trained labels, e.g. list/estimate). 20 tests passing.
+
+**Mock MCP server** (`POST /mcp`, JSON-RPC 2.0, streamable HTTP):
+`initialize`, `tools/list`, `tools/call`; 7 tools mirroring the skills.
+Consumable by any MCP client; the router prefers MCP via ADK when the
+agent card advertises it.
+
+### 15.5 Central skill registry (router)
+
+`GET /skills` — unified catalog of every skill from every reachable
+worker (discovered from agent cards; 5-min TTL cache; unreachable
+agents keep last-known skills flagged `stale`).
+`POST /skills/refresh`, `GET /skills/{name}`,
+`POST /skills/{name}/call` (ADK execution, MCP preferred).
+
+### 15.6 Live verification (2026-10-10)
+
+```bash
+BASE=https://intent-router-1031371624665.us-central1.run.app
+curl -s -X POST $BASE/route -H 'content-type: application/json' \
+  -d '{"text":"where is my package, order #48291"}'
+# intent=order_status → analyzer track@0.983 → adk-a2a dispatch →
+# "Order #48291 is shipped. UPS tracking 1Z999AA10123456784, arriving 2026-10-14."
+
+curl -s -X POST $BASE/route -H 'content-type: application/json' \
+  -d '{"text":"cancel my order #77340"}'
+# analyzer cancel@1.0 → "Order #77340 cancelled. $129.00 will be refunded."
+
+curl -s -X POST $BASE/skills/track_order/call \
+  -H 'content-type: application/json' \
+  -d '{"args":{"order_id":"48291"},"protocol":"mcp"}'
+# mode=adk-mcp, ok=true
+```
+
+### 15.7 Known gaps / next
+
+- "delete my order" → analyzer says `modify` @ 0.939 (should be
+  `cancel`): "delete" phrasing missing from cancel training data.
+  Fix: retrain orders head or add a policy-tree rule.
+- Order store is in-memory: state resets on Cloud Run scale-to-zero.
+  Swap `orders_db` for a real orders API before any real use.
+- `place_order` skill (new orders from catalog) in progress, not yet
+  deployed.
+- Dynamic skill hot-reload (`skills/skills.yaml` + mtime check, same
+  pattern as the policy tree) in progress: one edit updates the agent
+  card and MCP tools without redeploy; the registry re-discovers.
+- First `/route` after a deploy takes ~60 s (ADK import + analyzer cold
+  start); consider a startup warmup probe.
