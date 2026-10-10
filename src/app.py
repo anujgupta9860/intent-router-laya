@@ -73,6 +73,10 @@ async def lifespan(app: FastAPI):
             base_url=settings.analyzer_url,
             timeout_s=settings.analyzer_timeout_s),
     )
+    # Central skill registry: discovers every worker agent's card once,
+    # serves the unified catalog at GET /skills.
+    from .skill_registry import SkillRegistry
+    _state["skills"] = SkillRegistry(settings.worker_agents)
     _state.update(settings=settings, intents=intents, router=router)
     log.info(
         "intent-router-laya ready: system1=%s(%s) system2=%s intents=%s",
@@ -109,6 +113,37 @@ def health():
         "system2": settings.system2_backend if settings else None,
         "intents": intent_names(intents),
     }
+
+
+def _skills():
+    reg = _state.get("skills")
+    if reg is None:
+        raise HTTPException(status_code=503,
+                            detail="skill registry not initialized")
+    return reg
+
+
+@app.get("/skills")
+def list_skills():
+    """Unified skill catalog: every skill from every reachable agent,
+    in one place."""
+    return _skills().catalog()
+
+
+@app.post("/skills/refresh")
+def refresh_skills():
+    """Force re-discovery of all agent cards now."""
+    return _skills().refresh()
+
+
+@app.get("/skills/{name}")
+def get_skill(name: str):
+    """Find which agent provides a skill and how to call it."""
+    skill = _skills().find_skill(name)
+    if skill is None:
+        raise HTTPException(status_code=404,
+                            detail=f"no agent provides skill {name!r}")
+    return skill
 
 
 @app.post("/classify")
