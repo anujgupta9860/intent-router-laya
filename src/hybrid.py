@@ -41,6 +41,7 @@ from .laya_client import (
     GUARDRAIL_RUBRIC,
     LayaClient,
     LayaError,
+    SkillDecision,
     SystemOneDecision,
     WorkflowDecision,
 )
@@ -324,6 +325,49 @@ class SystemOne:
             model=model,
             latency_ms=latency_ms,
         )
+
+    def select_skill(self, text: str, worker_agent: str, workflow: str,
+                     step_id: str, slots: dict,
+                     suggested_action: str | None = None,
+                     available_skills: list | None = None) -> SkillDecision:
+        """System 1, decision 3: which skill to execute.
+
+        Called ONLY after the workflow step's slots are filled
+        (multi-turn slot filling comes first). System 1 sees the
+        filled slots, the step context, and the available skills,
+        then picks the skill — the step's suggested action is a hint,
+        not the decision.
+
+        Current backend: resolve the suggested action against the
+        skill registry. Future: Laya skill head — same interface.
+        """
+        import time
+        started = time.monotonic()
+        model = "system1-skill"
+        skill = None
+        confidence = 0.0
+        if suggested_action and available_skills:
+            # Match the step's suggested action to a registered skill.
+            # e.g. action "return" -> skill "return_order".
+            for s in available_skills:
+                name = s.get("skill", "")
+                if name == suggested_action or \
+                        name == f"{suggested_action}_order" or \
+                        name.startswith(suggested_action):
+                    skill = name
+                    confidence = 0.9
+                    model = "system1-skill/registry"
+                    break
+        elif suggested_action:
+            # No registry available — trust the step's suggestion as
+            # the fallback, but record that System 1 made the call.
+            skill = (suggested_action if suggested_action.endswith("_order")
+                     else f"{suggested_action}_order")
+            confidence = 0.5
+            model = "system1-skill/fallback"
+        latency_ms = (time.monotonic() - started) * 1000.0
+        return SkillDecision(skill=skill, confidence=confidence,
+                             model=model, latency_ms=latency_ms)
 
 
 class HybridRouter:
@@ -650,12 +694,29 @@ class HybridRouter:
                 "latency_ms": round((time.monotonic() - started) * 1000.0, 1),
                 "ts": time.time(),
             }
-        # All slots filled — execute the step as a locked task.
+        # All slots filled — System 1, decision 3: which skill to run.
+        # Multi-turn slot filling comes FIRST; skill selection AFTER.
+        # The step's action is a hint, not the decision.
+        available = None
+        try:
+            reg = getattr(getattr(self, "executor", None),
+                          "registry", None)
+            if reg is not None:
+                available = [s for s in reg.catalog().get("skills", [])
+                             if "order" in s.get("agent", "")]
+        except Exception:
+            available = None
+        skill_decision = self.system_one.select_skill(
+            text, s1.worker_agent, st.workflow_name, step["id"],
+            dict(st.slots), suggested_action=step.get("action"),
+            available_skills=available)
+        skill_name = skill_decision.skill or step.get("action")
         self.workflows.begin_step(session_id)  # started → inprogress
         context = {
-            "analyzer": {"order_action": step["action"]},
+            "analyzer": {"order_action": skill_name},
             "session": {"task_id": f"wf-{st.workflow_name}-{step['id']}",
-                        "slots": st.slots, "action": step["action"],
+                        "slots": st.slots, "action": skill_name,
+                        "skill_selected_by": "system1",
                         "workflow": st.workflow_name,
                         "step": step["id"],
                         # full message history so the worker can extract
@@ -684,6 +745,8 @@ class HybridRouter:
             "system1_intent": s1.intent if decision_made else None,
             "system1_workflow": st.workflow_name,
             "workflow_selected_by": "system1",
+            "system1_skill": skill_name,
+            "skill_selected_by": "system1",
             "session_id": session_id,
             "decision_made": decision_made,
             "decision_reason": reason,

@@ -90,6 +90,22 @@ class WorkflowDecision:
 
 
 @dataclass
+class SkillDecision:
+    """System 1's third decision: which skill to execute, made AFTER
+    the workflow's slots are filled.
+
+    The step definition may suggest an action, but System 1 makes the
+    call — it sees the filled slots, the step context, and the
+    available skills. A trained Laya skill head replaces the backend;
+    the router code does not change.
+    """
+    skill: str | None = None      # skill name, or None = cannot decide
+    confidence: float = 0.0
+    model: str = ""
+    latency_ms: float = 0.0
+
+
+@dataclass
 class SystemOneDecision:
     """Everything System 1 decided about one query."""
     intent: str
