@@ -503,7 +503,8 @@ class HybridRouter:
 
     def _fill_slots(self, text: str, task) -> None:
         for name, value in self._extract_slots(text).items():
-            task.slots[name] = value
+            if name not in task.slots:
+                task.slots[name] = value
 
     def _update_task_from_result(self, task, resp: dict) -> None:
         status = (resp.get("dispatch") or {}).get("result", {}).get("status")
@@ -667,10 +668,15 @@ class HybridRouter:
         s1 = type("S1", (), {"intent": "order_status",
                              "confidence": 1.0,
                              "worker_agent": st.definition.get("agent")})()
-        # If the message looks like a new workflow trigger for a
-        # DIFFERENT workflow → switch: abort and re-identify.
+        # Switch detection: only re-identify when the message does NOT
+        # fill a missing slot — a slot fill is a continuation, not a
+        # new goal.
+        from .workflow_engine import extract_slots as _extract
+        missing = self.workflows.missing_slots(st)
+        fills = [s for s in _extract(text) if s in missing]
         new_wf = None
-        if self.analyzer is not None and self.analyzer.enabled:
+        if not fills and self.analyzer is not None and \
+                self.analyzer.enabled:
             new_wf = self.analyzer.identify_workflow(
                 text, st.definition.get("agent", ""))
         if new_wf and new_wf["name"] != st.workflow_name:

@@ -157,14 +157,19 @@ class WorkflowEngine:
     def store_slots(self, session_id: str, text: str,
                     extra: dict | None = None) -> dict:
         """Extract details from the message (and worker-returned slots)
-        and STORE them in the session's workflow state. Returns all slots."""
+        and STORE them in the session's workflow state. Returns all slots.
+
+        Already-filled slots are NOT overwritten — a zip code inside an
+        address must not clobber the stored order_id."""
         st = self._sessions.get(session_id)
         if st is None:
             return dict(extra or {})
         found = extract_slots(text)
         if extra:
             found.update(extra)
-        st.slots.update(found)
+        for k, v in found.items():
+            if k not in st.slots:
+                st.slots[k] = v
         return dict(st.slots)
 
     # ------------------------------------------------------- transitions
