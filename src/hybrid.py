@@ -584,7 +584,8 @@ class HybridRouter:
 
     def _run_workflow_step(self, text: str, st, s1, session_id: str,
                            reason: str, wf_decision: dict | None,
-                           *, started: float) -> dict:
+                           *, started: float,
+                           decision_made: bool = True) -> dict:
         # Remember every user message in the session.
         st.messages.append(text)
         step = self.workflows.current_step(st)
@@ -596,10 +597,10 @@ class HybridRouter:
             return {
                 "path": "workflow",
                 "intent": s1.intent,
-                "system1_intent": s1.intent,
+                "system1_intent": s1.intent if decision_made else None,
                 "system1_workflow": st.workflow_name,
                 "session_id": session_id,
-                "decision_made": True,
+                "decision_made": decision_made,
                 "decision_reason": reason,
                 "workflow": st.to_dict(),
                 "task": None,
@@ -643,10 +644,10 @@ class HybridRouter:
         return {
             "path": "workflow",
             "intent": s1.intent,
-            "system1_intent": s1.intent,
+            "system1_intent": s1.intent if decision_made else None,
             "system1_workflow": st.workflow_name,
             "session_id": session_id,
-            "decision_made": True,
+            "decision_made": decision_made,
             "decision_reason": reason,
             "workflow": fresh.to_dict() if fresh else st.to_dict(),
             "workflow_step": step["id"],
@@ -689,7 +690,8 @@ class HybridRouter:
             return self._start_workflow(text, s1, new_wf, session_id,
                                         "workflow_switch", started=started)
         return self._run_workflow_step(text, st, s1, session_id, reason,
-                                       None, started=started)
+                                       None, started=started,
+                                       decision_made=False)
 
     def _abort_workflow(self, text: str, st, session_id: str,
                         *, started: float) -> dict:
