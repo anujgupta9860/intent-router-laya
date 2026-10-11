@@ -329,7 +329,8 @@ class SystemOne:
     def select_skill(self, text: str, worker_agent: str, workflow: str,
                      step_id: str, slots: dict,
                      suggested_action: str | None = None,
-                     available_skills: list | None = None) -> SkillDecision:
+                     available_skills: list | None = None,
+                     skill_policy: list | None = None) -> SkillDecision:
         """System 1, decision 3: which skill to execute.
 
         Called ONLY after the workflow step's slots are filled
@@ -338,15 +339,28 @@ class SystemOne:
         then picks the skill — the step's suggested action is a hint,
         not the decision.
 
-        Current backend: resolve the suggested action against the
-        skill registry. Future: Laya skill head — same interface.
+        Backend (policy-based, no model training needed):
+          1. Evaluate the step's skill_policy rules first-match-wins
+             against the filled slots.
+          2. Fall back to resolving the suggested action against the
+             skill registry.
+          3. Last resort: derive a skill name from the hint.
         """
         import time
         started = time.monotonic()
         model = "system1-skill"
         skill = None
         confidence = 0.0
-        if suggested_action and available_skills:
+        # 1. Policy rules first: filled slots -> skill.
+        for rule in (skill_policy or []):
+            when = rule.get("when", {})
+            if all(slots.get(k) == v for k, v in when.items()):
+                skill = rule["skill"]
+                confidence = 0.95
+                model = "system1-skill/policy"
+                break
+        # 2. Registry resolution of the step's hint.
+        if skill is None and suggested_action and available_skills:
             # Match the step's suggested action to a registered skill.
             # e.g. action "return" -> skill "return_order".
             for s in available_skills:
@@ -358,9 +372,8 @@ class SystemOne:
                     confidence = 0.9
                     model = "system1-skill/registry"
                     break
-        elif suggested_action:
-            # No registry available — trust the step's suggestion as
-            # the fallback, but record that System 1 made the call.
+        # 3. Last resort: derive from the hint.
+        if skill is None and suggested_action:
             skill = (suggested_action if suggested_action.endswith("_order")
                      else f"{suggested_action}_order")
             confidence = 0.5
@@ -709,7 +722,8 @@ class HybridRouter:
         skill_decision = self.system_one.select_skill(
             text, s1.worker_agent, st.workflow_name, step["id"],
             dict(st.slots), suggested_action=step.get("action"),
-            available_skills=available)
+            available_skills=available,
+            skill_policy=step.get("skill_policy"))
         skill_name = skill_decision.skill or step.get("action")
         self.workflows.begin_step(session_id)  # started → inprogress
         context = {
