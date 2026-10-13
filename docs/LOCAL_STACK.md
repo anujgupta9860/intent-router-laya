@@ -28,6 +28,23 @@ That's it. Everything lives under `~/laya-local` (override with `LAYA_BASE`).
 | `new-agent <name> [intent] [port]` | Scaffolds a new A2A worker agent (template + venv + deps), registers it in `worker.json`; `run` auto-discovers it |
 | `stop` | Stops everything |
 
+## System 1: mock vs Laya
+
+The router's System 1 defaults to `mock` (deterministic keyword rules).
+For the real model:
+
+```bash
+SYSTEM1_BACKEND=laya bash scripts/laya-stack.sh run
+```
+
+`setup` installs the `laya` package and offers the fine-tuned checkpoint
+from GCS (`gs://laya-checkpoints-anuj/laya-rlcd/laya_finetuned/` — the
+production canary weights, trained on our RLCD data). If skipped, `run`
+falls back to the base HF checkpoint (`convaiinnovations/laya-typed-decisions`,
+downloaded on first use), which answers our questions zero-shot — expect
+lower accuracy than the fine-tuned weights until Laya is retrained on new
+taxonomies.
+
 ## Onboarding a new agent (end to end)
 
 1. **Taxonomy** — analyzer Studio → Training Data tab → new agent `<name>`

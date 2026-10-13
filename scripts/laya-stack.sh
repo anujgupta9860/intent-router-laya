@@ -15,7 +15,9 @@
 #   bash laya-stack.sh stop               # stop everything
 #
 # Knobs (env): LAYA_BASE, ROUTER_PORT, ANALYZER_PORT, ORDER_PORT,
-#              ANALYZER_CHECKPOINT_GCS, PYTHON_BIN
+#              ANALYZER_CHECKPOINT_GCS, PYTHON_BIN, SYSTEM1_BACKEND
+#              (mock| laya — laya uses the fine-tuned checkpoint if
+#              downloaded, else the base HF checkpoint)
 #
 set -euo pipefail
 
@@ -381,6 +383,25 @@ cmd_setup() {
     info "  checkpoint already present"
   fi
 
+  # Laya fine-tuned checkpoint (for SYSTEM1_BACKEND=laya). The base HF
+  # checkpoint downloads automatically on first use if this is skipped.
+  info "Laya fine-tuned checkpoint (optional)"
+  if [ ! -d "$LAYA_BASE/intent-router-laya/checkpoints/laya_finetuned" ]; then
+    if command -v gcloud >/dev/null 2>&1; then
+      printf "  Download fine-tuned Laya checkpoint from GCS? [y/N] "
+      read -r ans
+      if [[ "$ans" =~ ^[Yy]$ ]]; then
+        mkdir -p "$LAYA_BASE/intent-router-laya/checkpoints"
+        gcloud storage cp -r "gs://laya-checkpoints-anuj/laya-rlcd/laya_finetuned/" \
+          "$LAYA_BASE/intent-router-laya/checkpoints/laya_finetuned"
+      fi
+    else
+      echo "  gcloud not found — skipped. Base HF checkpoint downloads on first use."
+    fi
+  else
+    info "  fine-tuned checkpoint already present"
+  fi
+
   info "Setup done. Next:  bash $0 run"
 }
 
@@ -427,10 +448,29 @@ cmd_run() {
     wait_for "http://localhost:$wport/health" "$wname" 30
   done < <(list_workers)
 
+  # System 1 backend: mock (default) or laya. For laya, prefer the local
+  # fine-tuned checkpoint; fall back to the base HF checkpoint (the laya
+  # package downloads it on first use, zero-shot on our questions).
+  local s1_backend="${SYSTEM1_BACKEND:-mock}"
+  local s1_checkpoint=""
+  if [ "$s1_backend" = "laya" ]; then
+    if [ -d "$LAYA_BASE/intent-router-laya/checkpoints/laya_finetuned" ]; then
+      s1_checkpoint="$LAYA_BASE/intent-router-laya/checkpoints/laya_finetuned"
+      info "System 1: Laya (fine-tuned checkpoint)"
+    else
+      s1_checkpoint="convaiinnovations/laya-typed-decisions"
+      info "System 1: Laya (base HF checkpoint — no fine-tuned checkpoint found)"
+    fi
+  else
+    info "System 1: $s1_backend (set SYSTEM1_BACKEND=laya for the real model)"
+  fi
+
   start_svc router intent-router-laya "$ROUTER_PORT" \
     "ANALYZER_URL=$analyzer_url" \
     "ANALYZER_TIMEOUT_S=10" \
-    "WORKER_AGENTS_JSON=$wmap"
+    "WORKER_AGENTS_JSON=$wmap" \
+    "SYSTEM1_BACKEND=$s1_backend" \
+    "LAYA_CHECKPOINT=$s1_checkpoint"
 
   wait_for "http://localhost:$ROUTER_PORT/health" router 60
   echo ""
