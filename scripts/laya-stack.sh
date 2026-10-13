@@ -21,7 +21,18 @@
 #
 set -euo pipefail
 
-LAYA_BASE="${LAYA_BASE:-$HOME/laya-local}"
+# Base dir: the parent of the repo this script lives in, so the script
+# operates on the checkout you ran it from (e.g. ~/IdeaProjects) instead of
+# always ~/laya-local. An explicit LAYA_BASE still wins. The standalone copy
+# in ~/laya-setup (not inside a repo) falls back to ~/laya-local.
+_script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+_repo_dir="$(dirname "$_script_dir")"
+case "$(basename "$_repo_dir")" in
+  intent-router-laya|intent-analyzer-unified|order-agent)
+    _default_base="$(dirname "$_repo_dir")" ;;
+  *) _default_base="$HOME/laya-local" ;;
+esac
+LAYA_BASE="${LAYA_BASE:-$_default_base}"
 ROUTER_PORT="${ROUTER_PORT:-8080}"
 ANALYZER_PORT="${ANALYZER_PORT:-8081}"
 ORDER_PORT="${ORDER_PORT:-8082}"

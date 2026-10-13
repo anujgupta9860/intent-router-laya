@@ -14,7 +14,10 @@ bash scripts/laya-stack.sh setup   # clones the other two repos, builds venvs, i
 bash scripts/laya-stack.sh run     # starts all three services + smoke-tests the chain
 ```
 
-That's it. Everything lives under `~/laya-local` (override with `LAYA_BASE`).
+That's it. Everything lives under the parent of your checkout (e.g.
+`~/IdeaProjects` — override with `LAYA_BASE`). The script detects the
+checkout it was run from; the standalone copy in `~/laya-setup` falls back
+to `~/laya-local`.
 
 ## Commands
 
@@ -51,7 +54,7 @@ taxonomies.
 1. **Taxonomy** — analyzer Studio → Training Data tab → new agent `<name>`
    (labels + Noul flags + seeds) → Save → Build dataset.
 2. **Worker** — `bash scripts/laya-stack.sh new-agent <name>` — scaffolds
-   `~/laya-local/<name>-agent/` (FastAPI `/health` + `/message` + agent card),
+   `<base>/<name>-agent/` (FastAPI `/health` + `/message` + agent card),
    assigns the next free port from 8083, registers `worker.json`.
    Implement your logic in `src/app.py` → `handle()`; declare skills in
    `skills/skills.yaml`.
@@ -71,7 +74,7 @@ Knobs: `LAYA_BASE`, `ROUTER_PORT`, `ANALYZER_PORT`, `ORDER_PORT`,
 - Router: `http://localhost:8080` — `POST /route` is the front door
 - Analyzer: `http://localhost:8081` — Tier-2 typed decisions (only starts when a trained checkpoint exists at `intent-analyzer-unified/models/unified/`; otherwise the router runs without it)
 - Order agent: `http://localhost:8082` — A2A worker
-- Logs: `~/laya-local/logs/`
+- Logs: `<base>/logs/`
 
 Sample queries:
 
