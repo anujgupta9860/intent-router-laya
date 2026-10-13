@@ -98,6 +98,10 @@ _MOCK_RISK_PHRASES: list[tuple[float, list[str]]] = [
 ]
 
 _MOCK_ORDER_NUMBER_RE = re.compile(r"#\d+|\border\s*#?\s*\d{4,}|\b\d{5,}\b", re.I)
+# "list all my orders" needs NO order number — exempt it from the
+# needs-more-input flag (the blanket rule below is for single-order actions).
+_MOCK_LIST_ALL_RE = re.compile(
+    r"\b(list|show|view|see)\b.*\borders\b|\ball\s+(my\s+)?orders\b", re.I)
 _MOCK_FOLLOWUP_RE = re.compile(
     r"\b(what about|how about|and then|and the|the (second|first|other) one)\b"
     r"|^(yes|no|yeah|nope|okay|ok)[,.]?\s+(that|this|the|it)\b"
@@ -128,7 +132,8 @@ def mock_routing_decisions(text: str, intent: str) -> dict:
         skill = "escalation"
 
     needs_rag = 1.0 if skill == "knowledge_search" else 0.0
-    if intent == "order_status" and not _MOCK_ORDER_NUMBER_RE.search(text):
+    if (intent == "order_status" and not _MOCK_ORDER_NUMBER_RE.search(text)
+            and not _MOCK_LIST_ALL_RE.search(text)):
         needs_more_input = 0.9
     elif _MOCK_FOLLOWUP_RE.search(text):
         needs_more_input = 0.85
