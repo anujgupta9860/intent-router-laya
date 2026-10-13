@@ -64,9 +64,11 @@ curl -s -X POST localhost:8080/route -H 'content-type: application/json' \
 
 ## Prerequisites
 
-- **Python 3.11+** — macOS ships 3.9 (too old). `brew install python@3.12` works; the script accepts `PYTHON_BIN=/opt/homebrew/bin/python3.12`.
+- **Python 3.11+** — macOS ships 3.9 (too old). The script auto-installs a
+  uv-managed Python 3.12 when the system one is older — no manual upgrade
+  needed. (`PYTHON_BIN=/opt/homebrew/bin/python3.12` still works to force one.)
 - `git`, `curl`.
-- `uv` is auto-installed by the script (via brew on macOS, installer elsewhere) — used only to fetch a fallback Python if needed.
+- `uv` is auto-installed by the script (via brew on macOS, installer elsewhere).
 
 ## Known macOS quirk (Tahoe)
 

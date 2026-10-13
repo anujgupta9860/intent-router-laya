@@ -44,6 +44,22 @@ check_python() {
     || die "Python >= 3.11 required (have: $("$PYTHON_BIN" -V 2>&1))"
 }
 
+ensure_python() {
+  # The system python3 on many Macs is 3.9 — too old. Switch to a uv-managed
+  # 3.12 instead of dying. Idempotent: a good interpreter is left alone.
+  # Called by every command that uses PYTHON_BIN (setup/train/run/new-agent),
+  # since each `bash $0 ...` invocation is a fresh process.
+  if "$PYTHON_BIN" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+    return 0
+  fi
+  command -v uv >/dev/null 2>&1 || export PATH="$HOME/.local/bin:$PATH"
+  command -v uv >/dev/null 2>&1 || die "Python >= 3.11 required (have: $("$PYTHON_BIN" -V 2>&1)) and 'uv' is not installed — install it first: curl -LsSf https://astral.sh/uv/install.sh | sh"
+  info "System Python too old ($("$PYTHON_BIN" -V 2>&1)) — installing uv-managed Python 3.12"
+  uv python install 3.12 || die "uv python install failed"
+  PYTHON_BIN="$(uv python find 3.12)" || die "uv python find failed"
+  info "Using managed interpreter: $PYTHON_BIN"
+}
+
 wait_for() { # wait_for <url> <name> <timeout_s>
   local url="$1" name="$2" timeout="${3:-60}" i=0
   until curl -sf -o /dev/null "$url" 2>/dev/null; do
@@ -274,7 +290,9 @@ MDEOF
 
 cmd_setup() {
   need git
-  check_python
+  # uv first: it provides the Python itself when the system one is too old
+  # (macOS ships python3 3.9 — check_python below would die before the
+  # fallback ever ran).
   # uv: venv + package management without pip's macOS TLS quirks, much faster.
   if ! command -v uv >/dev/null 2>&1; then
     info "Installing uv"
@@ -285,6 +303,8 @@ cmd_setup() {
       export PATH="$HOME/.local/bin:$PATH"
     fi
   fi
+  ensure_python
+  check_python
   # Some Homebrew Pythons can't report the macOS version (platform.mac_ver()
   # returns ''), which breaks pip's truststore AND uv's interpreter probing.
   # Fall back to a uv-managed standalone build in that case (macOS only —
@@ -365,6 +385,7 @@ cmd_setup() {
 }
 
 cmd_run() {
+  ensure_python
   mkdir -p "$LOGDIR"
   for repo in $REPOS; do
     [ -d "$LAYA_BASE/$repo/.venv" ] || die "not set up — run 'bash $0 setup' first"
@@ -430,6 +451,7 @@ cmd_test() {
 }
 
 cmd_train() {
+  ensure_python
   local target="${1:-}"
   # MPS fallback flag only matters on Apple Silicon; harmless elsewhere.
   if [ "$OS" = "Darwin" ] && [ "$ARCH" = "arm64" ]; then
@@ -485,6 +507,7 @@ cmd_train() {
 }
 
 cmd_new_agent() { # new-agent <name> [intent] [port]
+  ensure_python
   local name="${1:-}"
   [ -n "$name" ] || die "usage: bash $0 new-agent <name> [intent] [port]"
   case "$name" in
