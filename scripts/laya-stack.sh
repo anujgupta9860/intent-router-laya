@@ -540,8 +540,33 @@ cmd_train() {
         && "$vpy" train/finetune.py --data train/dataset.jsonl --out models/intent-encoder )
       info "Done. Serve with: SYSTEM1_BACKEND=encoder"
       ;;
+    laya)
+      # Full RLCD fine-tune of Laya on Apple Silicon (MPS). Output lands at
+      # checkpoints/laya_finetuned — exactly where `run` looks for it when
+      # SYSTEM1_BACKEND=laya. Takes ~1-2 hours; rolling checkpoints each epoch.
+      local vpy="$LAYA_BASE/intent-router-laya/.venv/bin/python"
+      [ -x "$vpy" ] || die "router venv missing — run 'bash $0 setup' first"
+      [ "$OS" = "Darwin" ] && [ "$ARCH" = "arm64" ] || die "train laya needs Apple Silicon (MPS)"
+      ( cd "$LAYA_BASE/intent-router-laya" || die "router repo missing"
+        info "Building RLCD dataset from data/intents.yaml"
+        "$vpy" train/build_dataset.py --out train/dataset.jsonl --repeat 14 \
+          || die "dataset build failed"
+        info "Converting to RLCD format"
+        "$vpy" train/convert_dataset.py --in train/dataset.jsonl --out train/laya_rlcd.jsonl \
+          || die "RLCD convert failed"
+        info "Preprocessing (downloads base Laya model from Hugging Face)"
+        "$vpy" train/preprocess.py --data train/laya_rlcd.jsonl --out train_items.pt \
+          || die "preprocess failed"
+        local model_dir
+        model_dir="$(cat model_dir.txt)" || die "model_dir.txt missing after preprocess"
+        info "Fine-tuning Laya on MPS (4 epochs)"
+        TRAIN_ITEMS=train_items.pt "$vpy" train/train_mps.py "$model_dir" checkpoints/laya_finetuned \
+          || die "Laya fine-tune failed"
+      ) || die "train laya failed"
+      info "Done. Serve with: SYSTEM1_BACKEND=laya bash $0 run"
+      ;;
     *)
-      die "usage: bash $0 train [analyzer|router]"
+      die "usage: bash $0 train [analyzer|router|laya]"
       ;;
   esac
 }

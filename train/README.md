@@ -67,22 +67,33 @@ network at all.
 
 Laya's own fine-tuning flow trains the actual decision heads (choice /
 noul / score) with reinforcement learning from calibrated decisions.
-Upstream provides:
 
-- a fine-tuning notebook (Kaggle 2xT4) and an Apple Silicon script in
-  the [laya repo](https://github.com/NandhaKishorM/laya) — "Fine-tune
-  for better accuracy" / "Fine-Tuning" sections, which run the whole
-  loop: build dataset → train with RLCD → calibrate temperatures →
-  evaluate → export.
-
-Use `train/build_dataset.py` to generate the labeled decisions in JSONL,
-then reshape to their expected format:
+**On Apple Silicon (local, MPS)** — one command does the whole loop
+(dataset → RLCD → preprocess → 4-epoch RLCD train → calibrate → export):
 
 ```bash
-python train/build_dataset.py --out train/dataset.jsonl --repeat 20
-# -> each line: {query, intent, needs_human, utterance_type, guardrail_band}
-# map to Laya's (state, questions, expected answers) triples per their notebook
+bash scripts/laya-stack.sh train laya
+# output: checkpoints/laya_finetuned/ (exactly where `run` looks for it)
+SYSTEM1_BACKEND=laya bash scripts/laya-stack.sh run
 ```
+
+Takes ~1–2 hours. A rolling checkpoint is written after every epoch, so
+an interruption loses at most one epoch. If you run out of memory, lower
+the micro-batch: `MICRO_BATCH=4 bash scripts/laya-stack.sh train laya`.
+
+**On CUDA** — the same loop via the DDP script (from the repo root):
+
+```bash
+python train/build_dataset.py --out train/dataset.jsonl --repeat 14
+python train/convert_dataset.py --in train/dataset.jsonl --out train/laya_rlcd.jsonl
+python train/preprocess.py --data train/laya_rlcd.jsonl --out train_items.pt
+TRAIN_ITEMS=train_items.pt torchrun --standalone --nproc_per_node=1 \
+  train/train_single_gpu.py "$(cat model_dir.txt)" ./laya_finetuned
+```
+
+Upstream also provides a fine-tuning notebook (Kaggle 2xT4) and an Apple
+Silicon script in the [laya repo](https://github.com/NandhaKishorM/laya)
+— "Fine-tune for better accuracy" / "Fine-Tuning" sections.
 
 Why bother: Laya's vendor numbers put the fine-tuned
 `laya-typed-decisions` checkpoint at 0.766 accuracy vs 0.362 for the base

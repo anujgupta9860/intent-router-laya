@@ -25,6 +25,7 @@ That's it. Everything lives under `~/laya-local` (override with `LAYA_BASE`).
 | `test` | Just the two sample queries against a running router |
 | `train analyzer` | Builds the analyzer datasets if missing, downloads the ModernBERT base model if missing, then the full 5-epoch fine-tune (MPS/CUDA auto-detected) |
 | `train router` | Builds the router dataset if missing, then fine-tunes the ModernBERT encoder head (5 epochs) |
+| `train laya` | Full RLCD fine-tune of Laya on Apple Silicon (MPS, ~1–2 hours, 4 epochs) — output lands at `checkpoints/laya_finetuned`, where `run` picks it up under `SYSTEM1_BACKEND=laya` |
 | `new-agent <name> [intent] [port]` | Scaffolds a new A2A worker agent (template + venv + deps), registers it in `worker.json`; `run` auto-discovers it |
 | `stop` | Stops everything |
 
