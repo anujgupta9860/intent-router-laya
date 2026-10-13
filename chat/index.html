@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laya Chat</title>
+<style>
+  :root { --bg:#0b0f16; --panel:#111826; --line:#233044; --txt:#e8eef7; --mut:#8b98ad;
+          --acc:#5cc8ff; --user:#1d3a5f; --bad:#ff7a7a; --ok:#7dffa8; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font:14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display:flex; align-items:center; gap:12px; padding:12px 18px;
+           border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); }
+  header h1 { font-size:16px; margin:0; }
+  header .hint { font-size:12px; color:var(--mut); }
+  header button { margin-left:auto; }
+  button { background:var(--acc); color:#06121f; border:1px solid var(--acc);
+           border-radius:8px; padding:8px 14px; font-size:14px; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--txt); border-color:var(--line); }
+  button:disabled { opacity:.5; cursor:wait; }
+  #log { max-width:760px; margin:0 auto; padding:18px 14px 120px; }
+  .msg { margin:10px 0; display:flex; }
+  .msg.user { justify-content:flex-end; }
+  .bubble { max-width:80%; padding:10px 14px; border-radius:14px; white-space:pre-wrap; }
+  .msg.user .bubble { background:var(--user); border-bottom-right-radius:4px; }
+  .msg.agent .bubble { background:var(--panel); border:1px solid var(--line);
+                       border-bottom-left-radius:4px; }
+  .msg.agent.pending .bubble { color:var(--mut); }
+  details.trace { margin-top:8px; font-size:12px; color:var(--mut); }
+  details.trace summary { cursor:pointer; color:var(--acc); }
+  details.trace table { border-collapse:collapse; margin-top:6px; }
+  details.trace td { border:1px solid var(--line); padding:4px 8px; vertical-align:top; }
+  details.trace td.k { color:var(--txt); white-space:nowrap; }
+  .err { color:var(--bad); }
+  #composer { position:fixed; bottom:0; left:0; right:0; background:var(--bg);
+              border-top:1px solid var(--line); padding:12px; }
+  #composer .row { max-width:760px; margin:0 auto; display:flex; gap:8px; }
+  #q { flex:1; background:#0d1320; color:var(--txt); border:1px solid var(--line);
+       border-radius:8px; padding:10px 12px; font-size:14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>💬 Laya Chat</h1>
+  <span class="hint" id="sess"></span>
+  <button class="ghost" id="newConv">New conversation</button>
+</header>
+<div id="log"></div>
+<div id="composer">
+  <div class="row">
+    <input id="q" placeholder="Ask about your orders…" autocomplete="off">
+    <button id="send">Send</button>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+let sessionId = null;
+
+function setSess() {
+  $("sess").textContent = sessionId ? "session " + sessionId : "new session";
+}
+function esc(s){ return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+
+function addMsg(who, html, pending=false) {
+  const d = document.createElement("div");
+  d.className = "msg " + who + (pending ? " pending" : "");
+  d.innerHTML = `<div class="bubble">${html}</div>`;
+  $("log").appendChild(d);
+  d.scrollIntoView({block:"end"});
+  return d;
+}
+
+function answerText(d) {
+  const m = d.dispatch && d.dispatch.result && d.dispatch.result.message;
+  if (m) return esc(m);
+  if (d.dispatch && d.dispatch.status === "failed")
+    return `<span class="err">Worker failed: ${esc(d.dispatch.error || "unknown error")}</span>`;
+  return `Routed as <b>${esc(d.intent)}</b> (confidence ${d.confidence}) — no worker message returned.`;
+}
+
+function traceHTML(d) {
+  const rows = [];
+  const kv = (k, v) => rows.push(`<tr><td class="k">${k}</td><td>${esc(v)}</td></tr>`);
+  kv("path", d.path); kv("intent", `${d.intent} (${d.confidence})`);
+  if (d.worker_agent) kv("worker", d.worker_agent);
+  const a = d.analyzer;
+  if (a) {
+    const choice = a.order_action || a.billing_action || a.support_topic ||
+                   a.account_action || a.sales_intent || JSON.stringify(a).slice(0, 120);
+    kv("analyzer", `${choice} (conf ${a.choice_confidence ?? "?"})`);
+  } else kv("analyzer", "—");
+  if (d.task) kv("task", `${d.task.state} ${JSON.stringify(d.task.slots || {})}`);
+  kv("latency", `${d.latency_ms} ms`); kv("session", d.session_id);
+  return `<details class="trace"><summary>routing trace</summary><table>${rows.join("")}</table></details>`;
+}
+
+async function send() {
+  const text = $("q").value.trim();
+  if (!text) return;
+  $("q").value = "";
+  $("send").disabled = true;
+  addMsg("user", esc(text));
+  const pend = addMsg("agent", "thinking…", true);
+  try {
+    const r = await fetch("/route", {method:"POST",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({text, session_id: sessionId})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || "request failed");
+    sessionId = d.session_id; setSess();
+    pend.classList.remove("pending");
+    pend.querySelector(".bubble").innerHTML = answerText(d) + traceHTML(d);
+  } catch(e) {
+    pend.classList.remove("pending");
+    pend.querySelector(".bubble").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  } finally {
+    $("send").disabled = false;
+    $("q").focus();
+    pend.scrollIntoView({block:"end"});
+  }
+}
+
+$("send").onclick = send;
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") send(); });
+$("newConv").onclick = () => {
+  sessionId = null; setSess();
+  $("log").innerHTML = "";
+  addMsg("agent", "New conversation started. What can I help with?");
+};
+setSess();
+addMsg("agent", "Hi! Ask me about your orders — try <i>track my order with id 48291</i>.");
+$("q").focus();
+</script>
+</body>
+</html>

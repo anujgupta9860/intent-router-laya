@@ -231,6 +231,7 @@ cmd_run() {
   cmd_test
   echo ""
   info "All up. Logs in $LOGDIR. Stop with: bash $0 stop"
+  info "Chat UI: http://localhost:$ROUTER_PORT/chat"
 }
 
 cmd_test() {

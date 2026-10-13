@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .a2a_client import A2AClient
@@ -96,6 +98,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Intent Router (Hybrid: Laya S1 + Gemma S2)", version="0.1.0",
               lifespan=lifespan)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CHAT_INDEX = REPO_ROOT / "chat" / "index.html"
+
+
+@app.get("/chat")
+def chat():
+    """Browser chat UI over POST /route (same session mechanism as the API)."""
+    if not CHAT_INDEX.exists():
+        raise HTTPException(status_code=404, detail="chat UI not installed")
+    return FileResponse(CHAT_INDEX, media_type="text/html")
 
 # CORS for the Studio (served from the analyzer domain) calling the
 # skill registry directly.
