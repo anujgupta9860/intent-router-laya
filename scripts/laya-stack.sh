@@ -6,10 +6,12 @@
 # No root needed. Everything lives under $LAYA_BASE (default: ~/laya-local).
 #
 #   bash laya-stack.sh setup              # clone repos, venvs, deps, checkpoint
-#   bash laya-stack.sh run                # start analyzer :8081, order-agent :8082, router :8080 + smoke test
+#   bash laya-stack.sh run                # start analyzer :8081, workers, router :8080 + smoke test
 #   bash laya-stack.sh test               # run sample queries against the router
 #   bash laya-stack.sh train analyzer     # unified analyzer, 5 epochs (GPU: MPS/CUDA auto, else CPU)
 #   bash laya-stack.sh train router       # router ModernBERT encoder head, 5 epochs
+#   bash laya-stack.sh new-agent <name> [intent] [port]
+#                                         # scaffold a new A2A worker agent (auto-discovered by run)
 #   bash laya-stack.sh stop               # stop everything
 #
 # Knobs (env): LAYA_BASE, ROUTER_PORT, ANALYZER_PORT, ORDER_PORT,
@@ -119,6 +121,157 @@ start_svc() { # start_svc <name> <dir> <port> [env assignments...]
   )
 }
 
+list_workers() { # prints "<dirname> <intent> <port>" for each ready worker
+  local wdir
+  for wdir in "$LAYA_BASE"/*-agent; do
+    [ -f "$wdir/worker.json" ] || continue
+    [ -d "$wdir/.venv" ] || continue
+    "$PYTHON_BIN" - "$wdir" 2>/dev/null <<'PYEOF' || continue
+import json, sys
+w = json.load(open(sys.argv[1] + "/worker.json"))
+print(sys.argv[1].rsplit("/", 1)[-1], w["intent"], w["port"])
+PYEOF
+  done
+}
+
+worker_map_json() { # JSON intent->URL map for WORKER_AGENTS_JSON (no spaces: env $* splits)
+  "$PYTHON_BIN" - "$LAYA_BASE" 2>/dev/null <<'PYEOF' || echo '{}'
+import json, glob, sys
+entries = {}
+for wfile in sorted(glob.glob(sys.argv[1] + "/*-agent/worker.json")):
+    try:
+        w = json.load(open(wfile))
+        if w.get("intent") and w.get("port"):
+            entries[w["intent"]] = "http://localhost:%s" % w["port"]
+    except Exception:
+        pass
+if entries and "fallback" not in entries:
+    entries["fallback"] = next(iter(entries.values()))
+print(json.dumps(entries, separators=(",", ":")))
+PYEOF
+}
+
+write_worker_template() { # write_worker_template <dir> <name> <title>
+  # Minimal A2A worker: /health, /message, agent card. Fill in handle().
+  # Unquoted heredocs below expand $name/$title (template has no $ of its own).
+  local dir="$1" name="$2" title="$3"
+  cat > "$dir/requirements.txt" <<REQEOF
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.0
+REQEOF
+  touch "$dir/src/__init__.py"
+  cat > "$dir/src/app.py" <<PYEOF
+"""$title A2A worker agent (scaffolded by laya-stack.sh).
+
+A2A surface:
+  GET  /.well-known/agent-card.json
+  POST /message - {"text", "intent", "context": {"analyzer": {...}}}
+                  -> {"task_id", "status", "action", "message", "data"}
+  GET  /health
+
+Implement your domain logic in handle(). Tier-2 analyzer decisions arrive
+in context["analyzer"] (define the taxonomy in the analyzer Studio's
+Training Data tab first).
+"""
+from __future__ import annotations
+
+import logging
+import time
+import uuid
+
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
+
+AGENT_NAME = "$name"
+AGENT_TITLE = "$title"
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+
+app = FastAPI(title="$title (A2A worker)", version="0.1.0")
+
+
+def build_agent_card() -> dict:
+    return {
+        "name": "$name-agent",
+        "description": "$title worker. Scaffolded by laya-stack.sh.",
+        "version": "0.1.0",
+        "protocol": "a2a-http",
+        "endpoints": {"message": "/message"},
+        "skills": [{"name": "greet", "description": "Greet the user."}],
+        "input": {"text": "customer message", "intent": "router intent",
+                  "context": {"analyzer": "Tier-2 analyzer decisions"}},
+    }
+
+
+@app.get("/.well-known/agent-card.json")
+def agent_card():
+    return build_agent_card()
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "agent": "$name-agent"}
+
+
+class MessageRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+    intent: str = ""
+    context: dict = Field(default_factory=dict)
+
+
+def handle(text: str, intent: str, analyzer: dict) -> dict:
+    """TODO: implement your domain logic here.
+
+    \`analyzer\` carries your Tier-2 decisions, e.g.
+    analyzer.get("<your_choice_question>") plus your Noul flags.
+    Whatever you put in \`message\` is what the user sees.
+    """
+    task_id = "task-" + uuid.uuid4().hex[:8]
+    q = text.lower()
+    if any(g in q for g in ("hi", "hello", "hey", "namaste")):
+        return {"task_id": task_id, "status": "completed", "action": "greet",
+                "message": "Hello! I'm the $title agent. (scaffold — implement handle() in src/app.py)",
+                "data": {}}
+    return {"task_id": task_id, "status": "completed", "action": "echo",
+            "message": "[$name] received: " + text + " (scaffold — no domain logic yet)",
+            "data": {"intent": intent, "analyzer": analyzer}}
+
+
+@app.post("/message")
+def message(req: MessageRequest):
+    started = time.monotonic()
+    analyzer = (req.context or {}).get("analyzer") or {}
+    result = handle(req.text.strip(), req.intent.strip(), analyzer)
+    result["latency_ms"] = round((time.monotonic() - started) * 1000, 1)
+    result["ts"] = time.time()
+    log.info("task=%s action=%s status=%s", result["task_id"],
+             result.get("action"), result.get("status"))
+    return result
+PYEOF
+  cat > "$dir/skills/skills.yaml" <<YAMLEOF
+# Skills for the $name worker. List what your agent can do; wire them
+# into handle() in src/app.py as you implement them.
+version: 1
+skills:
+  - name: greet
+    description: Greet the user.
+YAMLEOF
+  cat > "$dir/README.md" <<MDEOF
+# $title agent (scaffolded by laya-stack.sh)
+
+1. **Taxonomy**: analyzer Studio → Training Data tab → new agent \`$name\`
+   (labels + Noul flags + seeds) → Build dataset → \`bash laya-stack.sh train analyzer\`.
+2. **Logic**: implement \`handle()\` in \`src/app.py\`; read Tier-2 decisions from
+   the \`analyzer\` dict.
+3. **Skills**: declare them in \`skills/skills.yaml\`.
+4. **Run**: \`bash laya-stack.sh run\` — this worker is auto-discovered via \`worker.json\`.
+
+Endpoints: \`GET /health\`, \`GET /.well-known/agent-card.json\`, \`POST /message\`.
+MDEOF
+}
+
 cmd_setup() {
   need git
   check_python
@@ -175,6 +328,22 @@ cmd_setup() {
     esac
   done
 
+  # Worker registry: order-agent is the built-in worker. Ports are captured
+  # at setup time; re-run setup if you change *_PORT afterwards.
+  printf '{"intent": "order_status", "port": %s}\n' "$ORDER_PORT" \
+    > "$LAYA_BASE/order-agent/worker.json"
+
+  # Scaffolded workers (from `new-agent`): venvs + deps.
+  local wdir
+  for wdir in "$LAYA_BASE"/*-agent; do
+    case "$wdir" in */order-agent) continue ;; esac
+    [ -f "$wdir/requirements.txt" ] || continue
+    info "  $(basename "$wdir") (scaffolded worker)"
+    make_venv "$wdir"
+    "$wdir/.venv/bin/python" -m pip install -q --upgrade pip
+    "$wdir/.venv/bin/python" -m pip install -q -r "$wdir/requirements.txt"
+  done
+
   info "Analyzer checkpoint (~596MB, optional)"
   if [ ! -d "$LAYA_BASE/intent-analyzer-unified/models/unified" ]; then
     if command -v gcloud >/dev/null 2>&1; then
@@ -218,13 +387,29 @@ cmd_run() {
     info "Build one via 'bash $0 train analyzer' (or download it from GCS)."
   fi
 
-  start_svc order-agent order-agent "$ORDER_PORT"
-  wait_for "http://localhost:$ORDER_PORT/health" order-agent 30
+  # Every *-agent/worker.json is a worker: start them all and build the
+  # router's intent->URL map from the same files (single source of truth).
+  local wdir
+  for wdir in "$LAYA_BASE"/*-agent; do
+    [ -f "$wdir/worker.json" ] || continue
+    [ -d "$wdir/.venv" ] || die "$(basename "$wdir") has no venv — run 'bash $0 setup' first"
+  done
+  local wmap
+  wmap="$(worker_map_json)"
+  [ "$wmap" != "{}" ] || die "no workers registered — run 'bash $0 setup' first"
+  info "Worker map: $wmap"
+
+  local wname wintent wport
+  while read -r wname wintent wport; do
+    [ -n "$wname" ] || continue
+    start_svc "$wname" "$wname" "$wport"
+    wait_for "http://localhost:$wport/health" "$wname" 30
+  done < <(list_workers)
 
   start_svc router intent-router-laya "$ROUTER_PORT" \
     "ANALYZER_URL=$analyzer_url" \
     "ANALYZER_TIMEOUT_S=10" \
-    "WORKER_AGENTS_JSON={\"order_status\":\"http://localhost:$ORDER_PORT\",\"fallback\":\"http://localhost:$ORDER_PORT\"}"
+    "WORKER_AGENTS_JSON=$wmap"
 
   wait_for "http://localhost:$ROUTER_PORT/health" router 60
   echo ""
@@ -299,6 +484,50 @@ cmd_train() {
   esac
 }
 
+cmd_new_agent() { # new-agent <name> [intent] [port]
+  local name="${1:-}"
+  [ -n "$name" ] || die "usage: bash $0 new-agent <name> [intent] [port]"
+  case "$name" in
+    ''|*[!a-z0-9_]*|_*|[0-9]*) die "name must be lowercase_underscores, e.g. refunds" ;;
+  esac
+  local intent="${2:-$name}"
+  case "$intent" in
+    ''|*[!a-z0-9_]*|_*|[0-9]*) die "intent must be lowercase_underscores" ;;
+  esac
+  local dir="$LAYA_BASE/${name}-agent"
+  [ -e "$dir" ] && die "$dir already exists"
+  local port="${3:-}"
+  if [ -z "$port" ]; then
+    port=8083
+    local used
+    used="$(list_workers | awk '{print $3}')"
+    while printf '%s\n' "$used" | grep -qx "$port"; do
+      port=$((port + 1))
+    done
+  fi
+  info "Scaffolding worker '$name' — intent '$intent' on :$port"
+  mkdir -p "$dir/src" "$dir/skills"
+  write_worker_template "$dir" "$name" "$(printf '%s' "$name" | tr '_' ' ')"
+  printf '{"intent": "%s", "port": %d}\n' "$intent" "$port" > "$dir/worker.json"
+  make_venv "$dir"
+  "$dir/.venv/bin/python" -m pip install -q --upgrade pip \
+    || die "pip upgrade failed in $dir"
+  "$dir/.venv/bin/python" -m pip install -q -r "$dir/requirements.txt" \
+    || die "pip install failed in $dir"
+  echo ""
+  info "Worker ready at $dir"
+  info "  Taxonomy:  analyzer Studio -> Training Data tab -> new agent '$name'"
+  info "             (then: bash $0 train analyzer)"
+  info "  Logic:     $dir/src/app.py  (implement handle())"
+  info "  Skills:    $dir/skills/skills.yaml"
+  info "  Run:       bash $0 run   (this worker is auto-discovered)"
+  if [ "$intent" != "order_status" ]; then
+    info "  NOTE: '$intent' is a new intent — System 1 must learn it before"
+    info "        the router will dispatch to this worker:"
+    info "        bash $0 train router   (needs labeled examples for '$intent')"
+  fi
+}
+
 cmd_stop() {
   pkill -f "uvicorn src.app:app" && info "Stopped." || info "Nothing running."
 }
@@ -312,6 +541,7 @@ case "${1:-help}" in
   run)   cmd_run ;;
   test)  cmd_test ;;
   train) cmd_train "${2:-}" ;;
+  new-agent) cmd_new_agent "${2:-}" "${3:-}" "${4:-}" ;;
   stop)  cmd_stop ;;
   *)     cmd_help ;;
 esac

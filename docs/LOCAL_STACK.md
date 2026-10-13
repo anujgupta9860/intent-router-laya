@@ -21,11 +21,29 @@ That's it. Everything lives under `~/laya-local` (override with `LAYA_BASE`).
 | Command | What it does |
 |---|---|
 | `setup` | Clones/updates the 3 repos, creates a `.venv` per repo, installs requirements (+ torch), optionally downloads the pre-trained analyzer checkpoint from GCS |
-| `run` | Starts analyzer `:8081`, order-agent `:8082`, router `:8080` (wired together), waits for health, then fires two real queries through the chain |
+| `run` | Starts analyzer `:8081`, all registered workers, router `:8080` (wired together), waits for health, then fires two real queries through the chain |
 | `test` | Just the two sample queries against a running router |
 | `train analyzer` | Builds the analyzer datasets if missing, downloads the ModernBERT base model if missing, then the full 5-epoch fine-tune (MPS/CUDA auto-detected) |
 | `train router` | Builds the router dataset if missing, then fine-tunes the ModernBERT encoder head (5 epochs) |
+| `new-agent <name> [intent] [port]` | Scaffolds a new A2A worker agent (template + venv + deps), registers it in `worker.json`; `run` auto-discovers it |
 | `stop` | Stops everything |
+
+## Onboarding a new agent (end to end)
+
+1. **Taxonomy** — analyzer Studio → Training Data tab → new agent `<name>`
+   (labels + Noul flags + seeds) → Save → Build dataset.
+2. **Worker** — `bash scripts/laya-stack.sh new-agent <name>` — scaffolds
+   `~/laya-local/<name>-agent/` (FastAPI `/health` + `/message` + agent card),
+   assigns the next free port from 8083, registers `worker.json`.
+   Implement your logic in `src/app.py` → `handle()`; declare skills in
+   `skills/skills.yaml`.
+3. **Retrain the analyzer** — `bash scripts/laya-stack.sh train analyzer`
+   (picks up the new agent's heads automatically).
+4. **Run** — `bash scripts/laya-stack.sh run` discovers the new worker and
+   wires the router's intent→URL map from `worker.json` files. The new
+   worker's `intent` (default: the agent name) is what System 1 must output —
+   for a genuinely new intent, retrain the router (`train router`) with
+   labeled examples so it learns to route there.
 
 Knobs: `LAYA_BASE`, `ROUTER_PORT`, `ANALYZER_PORT`, `ORDER_PORT`,
 `ANALYZER_CHECKPOINT_GCS`, `PYTHON_BIN`.
