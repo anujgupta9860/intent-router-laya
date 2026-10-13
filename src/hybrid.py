@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import uuid
 
 from .a2a_client import A2AClient
 from .analyzer_client import AnalyzerClient
