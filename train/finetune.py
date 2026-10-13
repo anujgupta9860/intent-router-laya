@@ -113,11 +113,14 @@ def main() -> None:
     # --- temperature scaling on the validation split (calibration) ---
     model.eval()
     logits_list, labels_list = [], []
+    # The Trainer handles device placement, but this manual loop must do it
+    # explicitly — on MPS/CUDA the model is not on CPU.
+    _dev = next(model.parameters()).device
     with torch.no_grad():
         for i in range(0, len(val_enc["input_ids"]), 32):
-            batch = {k: torch.tensor(v[i:i + 32]) for k, v in val_enc.items()
+            batch = {k: torch.tensor(v[i:i + 32], device=_dev) for k, v in val_enc.items()
                      if k != "labels"}
-            logits_list.append(model(**batch).logits)
+            logits_list.append(model(**batch).logits.cpu())
             labels_list.append(torch.tensor(val_enc["labels"][i:i + 32]))
     logits = torch.cat(logits_list)
     targets = torch.cat(labels_list)
