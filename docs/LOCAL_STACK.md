@@ -29,6 +29,7 @@ to `~/laya-local`.
 | `train analyzer` | Builds the analyzer datasets if missing, downloads the ModernBERT base model if missing, then the full 5-epoch fine-tune (MPS/CUDA auto-detected) |
 | `train router` | Builds the router dataset if missing, then fine-tunes the ModernBERT encoder head (5 epochs) |
 | `train laya` | Full RLCD fine-tune of Laya on Apple Silicon (MPS, ~1–2 hours, 4 epochs) — output lands at `checkpoints/laya_finetuned`, where `run` picks it up under `SYSTEM1_BACKEND=laya` |
+| `train laya-feedback` | Same, but mixes in human-approved System 2 feedback (reviewed in the /review UI first) with the base dataset |
 | `new-agent <name> [intent] [port]` | Scaffolds a new A2A worker agent (template + venv + deps), registers it in `worker.json`; `run` auto-discovers it |
 | `stop` | Stops everything |
 
@@ -48,6 +49,19 @@ falls back to the base HF checkpoint (`convaiinnovations/laya-typed-decisions`,
 downloaded on first use), which answers our questions zero-shot — expect
 lower accuracy than the fine-tuned weights until Laya is retrained on new
 taxonomies.
+
+## RLCD review + retraining (all local)
+
+Every query that falls to System 2 is logged to `feedback/fallbacks.jsonl`
+— those are the hard cases System 1 needs to learn from.
+
+1. **Review:** open http://localhost:8080/review — Approve Gemma's labels,
+   Correct them (override any System 2 field), or Reject. Nothing trains
+   until reviewed.
+2. **Train:** `bash scripts/laya-stack.sh train laya-feedback` — exports the
+   approved records, mixes them with the base synthetic dataset (so the model
+   doesn't skew toward edge cases), and runs the full RLCD fine-tune.
+   Output lands at `checkpoints/laya_finetuned`.
 
 ## Onboarding a new agent (end to end)
 

@@ -576,8 +576,41 @@ cmd_train() {
       ) || die "train laya failed"
       info "Done. Serve with: SYSTEM1_BACKEND=laya bash $0 run"
       ;;
+    laya-feedback)
+      # Retrain Laya on human-reviewed System 2 feedback (reviewed in the
+      # /review UI first — pending records are skipped at export). Mixes the
+      # approved feedback with the base synthetic dataset so the model
+      # learns the hard cases without forgetting the base distribution.
+      # Output lands at checkpoints/laya_finetuned (where `run` picks it up).
+      local vpy="$LAYA_BASE/intent-router-laya/.venv/bin/python"
+      [ -x "$vpy" ] || die "router venv missing — run 'bash $0 setup' first"
+      [ "$OS" = "Darwin" ] && [ "$ARCH" = "arm64" ] || die "train laya-feedback needs Apple Silicon (MPS)"
+      ( cd "$LAYA_BASE/intent-router-laya" || die "router repo missing"
+        info "Exporting human-approved feedback"
+        "$vpy" -c "from src.feedback import feedback_to_dataset; print(feedback_to_dataset('feedback/fallbacks.jsonl', 'train/rlcd_feedback.jsonl'))" \
+          || die "feedback export failed"
+        if [ ! -f train/dataset.jsonl ]; then
+          info "Building base dataset (synthetic)"
+          "$vpy" train/build_dataset.py --out train/dataset.jsonl --repeat 14 \
+            || die "dataset build failed"
+        fi
+        info "Mixing base + approved feedback, converting to RLCD"
+        cat train/dataset.jsonl train/rlcd_feedback.jsonl > train/dataset_mixed.jsonl
+        "$vpy" train/convert_dataset.py --in train/dataset_mixed.jsonl --out train/laya_rlcd.jsonl \
+          || die "RLCD convert failed"
+        info "Preprocessing (downloads base Laya model from Hugging Face if needed)"
+        "$vpy" train/preprocess.py --data train/laya_rlcd.jsonl --out train_items.pt \
+          || die "preprocess failed"
+        local model_dir
+        model_dir="$(cat model_dir.txt)" || die "model_dir.txt missing after preprocess"
+        info "Fine-tuning Laya on MPS (4 epochs)"
+        TRAIN_ITEMS=train_items.pt "$vpy" train/train_mps.py "$model_dir" checkpoints/laya_finetuned \
+          || die "Laya fine-tune failed"
+      ) || die "train laya-feedback failed"
+      info "Done. Serve with: SYSTEM1_BACKEND=laya bash $0 run"
+      ;;
     *)
-      die "usage: bash $0 train [analyzer|router|laya]"
+      die "usage: bash $0 train [analyzer|router|laya|laya-feedback]"
       ;;
   esac
 }

@@ -101,6 +101,7 @@ app = FastAPI(title="Intent Router (Hybrid: Laya S1 + Gemma S2)", version="0.1.0
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CHAT_INDEX = REPO_ROOT / "chat" / "index.html"
+REVIEW_INDEX = REPO_ROOT / "review" / "index.html"
 
 
 @app.get("/chat")
@@ -109,6 +110,14 @@ def chat():
     if not CHAT_INDEX.exists():
         raise HTTPException(status_code=404, detail="chat UI not installed")
     return FileResponse(CHAT_INDEX, media_type="text/html")
+
+
+@app.get("/review")
+def review():
+    """Browser UI for the RLCD human review queue (approve/correct/reject)."""
+    if not REVIEW_INDEX.exists():
+        raise HTTPException(status_code=404, detail="review UI not installed")
+    return FileResponse(REVIEW_INDEX, media_type="text/html")
 
 # CORS for the Studio (served from the analyzer domain) calling the
 # skill registry directly.

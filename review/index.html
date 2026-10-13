@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RLCD Review</title>
+<style>
+  body { background:#0f172a; color:#e2e8f0; font-family:system-ui, sans-serif; margin:0; padding:24px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:#94a3b8; font-size:13px; margin-bottom:16px; }
+  .stats { display:flex; gap:12px; margin-bottom:20px; flex-wrap:wrap; }
+  .stat { background:#1e293b; border-radius:8px; padding:10px 16px; font-size:13px; }
+  .stat b { font-size:18px; display:block; }
+  .card { background:#1e293b; border-radius:10px; padding:16px; margin-bottom:16px; }
+  .query { font-size:16px; font-weight:600; margin-bottom:10px; }
+  .cols { display:flex; gap:16px; flex-wrap:wrap; }
+  .col { flex:1; min-width:220px; background:#0f172a; border-radius:8px; padding:12px; }
+  .col h3 { margin:0 0 8px; font-size:13px; color:#94a3b8; text-transform:uppercase; }
+  .kv { font-size:13px; line-height:1.7; }
+  .kv b { color:#cbd5e1; }
+  .rationale { font-size:13px; font-style:italic; color:#a5b4fc; margin-top:8px; }
+  .actions { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  button { border:0; border-radius:6px; padding:8px 14px; cursor:pointer; font-size:13px; font-weight:600; }
+  .approve { background:#16a34a; color:#fff; }
+  .correct { background:#ca8a04; color:#fff; }
+  .reject { background:#dc2626; color:#fff; }
+  .secondary { background:#334155; color:#e2e8f0; }
+  .correct-form { display:none; margin-top:12px; background:#0f172a; border-radius:8px; padding:12px; }
+  .correct-form label { display:block; font-size:12px; color:#94a3b8; margin:6px 0 2px; }
+  .correct-form input, .correct-form select { width:100%; box-sizing:border-box; background:#1e293b; color:#e2e8f0; border:1px solid #334155; border-radius:4px; padding:6px; }
+  .empty { color:#94a3b8; font-size:14px; padding:32px 0; text-align:center; }
+  .train-hint { background:#1e293b; border-radius:8px; padding:12px 16px; font-size:13px; color:#94a3b8; margin-top:8px; }
+  .train-hint code { color:#e2e8f0; }
+  .err { color:#fca5a5; font-size:13px; }
+</style>
+</head>
+<body>
+<h1>RLCD Review</h1>
+<div class="sub">System 2 decisions awaiting human review. Approved / corrected records become Laya training data.</div>
+<div class="stats" id="stats"></div>
+<div id="queue"></div>
+<div class="train-hint">After reviewing, train locally with:<br><code>bash scripts/laya-stack.sh train laya-feedback</code></div>
+
+<script>
+const $ = s => document.querySelector(s);
+
+async function loadStats() {
+  try {
+    const r = await fetch('/rlcd/stats');
+    const s = await r.json();
+    $('#stats').innerHTML = [
+      ['pending', s.pending], ['approved', s.approved],
+      ['usable', s.usable], ['total', s.total],
+    ].map(([k, v]) => `<div class="stat"><b>${v ?? 0}</b>${k}</div>`).join('');
+  } catch (e) { $('#stats').innerHTML = `<span class="err">stats unavailable: ${e}</span>`; }
+}
+
+function kv(obj, keys) {
+  return keys.map(k => {
+    const v = obj?.[k];
+    if (v === undefined || v === null) return '';
+    return `<div><b>${k}:</b> ${typeof v === 'number' ? v.toFixed(3) : v}</div>`;
+  }).join('');
+}
+
+const S1_KEYS = ['intent', 'confidence', 'worker_agent', 'worker_confidence', 'skill_required', 'skill_confidence', 'needs_human', 'utterance_type', 'guardrail_score', 'needs_rag', 'needs_more_input', 'needs_user_details', 'is_multi_turn', 'needs_async'];
+const S2_KEYS = ['intent', 'confidence', 'escalate_to_human', 'worker_agent', 'skill_required', 'needs_rag', 'needs_more_input', 'needs_user_details', 'is_multi_turn', 'needs_async'];
+const NOULS = ['needs_rag', 'needs_more_input', 'needs_user_details', 'is_multi_turn', 'needs_async'];
+
+function card(rec) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.id = 'rec-' + rec.id;
+  const s1 = rec.s1 || {}, s2 = rec.s2 || {};
+  const corr = NOULS.map(k =>
+    `<label>${k}</label><select data-k="${k}"><option value="0" ${(+s2[k] || 0) < 0.5 ? 'selected' : ''}>0</option><option value="1" ${(+s2[k] || 0) >= 0.5 ? 'selected' : ''}>1</option></select>`
+  ).join('');
+  el.innerHTML = `
+    <div class="query">${escapeHtml(rec.query || '')}</div>
+    <div class="cols">
+      <div class="col"><h3>System 1 (what failed)</h3><div class="kv">${kv(s1, S1_KEYS)}</div></div>
+      <div class="col"><h3>System 2 (Gemma's call)</h3><div class="kv">${kv(s2, S2_KEYS)}</div>
+      ${s2.rationale ? `<div class="rationale">"${escapeHtml(s2.rationale)}"</div>` : ''}</div>
+    </div>
+    <div class="actions">
+      <button class="approve">Approve</button>
+      <button class="correct">Correct…</button>
+      <button class="reject">Reject</button>
+    </div>
+    <div class="correct-form">
+      <label>intent</label><input data-k="intent" value="${escapeAttr(s2.intent || '')}">
+      <label>worker_agent</label><input data-k="worker_agent" value="${escapeAttr(s2.worker_agent || '')}">
+      <label>skill_required</label><input data-k="skill_required" value="${escapeAttr(s2.skill_required || '')}">
+      <label>escalate_to_human</label><select data-k="escalate_to_human"><option value="0" ${!s2.escalate_to_human ? 'selected' : ''}>0</option><option value="1" ${s2.escalate_to_human ? 'selected' : ''}>1</option></select>
+      ${corr}
+      <div class="actions"><button class="correct secondary">Submit correction</button></div>
+    </div>`;
+  el.querySelector('.approve').onclick = () => act(rec.id, 'approved', null, el);
+  el.querySelector('.reject').onclick = () => act(rec.id, 'rejected', null, el);
+  el.querySelector('.correct').onclick = () => {
+    const f = el.querySelector('.correct-form');
+    f.style.display = f.style.display === 'block' ? 'none' : 'block';
+  };
+  el.querySelector('.correct-form .correct').onclick = () => {
+    const corrections = {};
+    el.querySelectorAll('.correct-form [data-k]').forEach(inp => {
+      const k = inp.dataset.k;
+      let v = inp.value;
+      if (NOULS.includes(k) || k === 'escalate_to_human') v = +v;
+      if (String(v) !== String(s2[k] ?? (NOULS.includes(k) ? 0 : ''))) corrections[k] = v;
+    });
+    act(rec.id, 'corrected', corrections, el);
+  };
+  return el;
+}
+
+async function act(id, decision, corrections, el) {
+  const body = { decision };
+  if (corrections) body.corrections = corrections;
+  const r = await fetch('/rlcd/review/' + id, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) { alert('review failed: ' + (await r.text())); return; }
+  el.remove();
+  loadStats();
+  if (!document.querySelector('#queue .card')) loadQueue();
+}
+
+async function loadQueue() {
+  const q = $('#queue');
+  try {
+    const r = await fetch('/rlcd/review');
+    const data = await r.json();
+    const pending = data.pending || [];
+    if (!pending.length) { q.innerHTML = '<div class="empty">No pending records — nothing to review.</div>'; return; }
+    q.innerHTML = '';
+    pending.forEach(rec => q.appendChild(card(rec)));
+  } catch (e) { q.innerHTML = `<span class="err">queue unavailable: ${e}</span>`; }
+}
+
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
+
+loadStats();
+loadQueue();
+</script>
+</body>
+</html>
