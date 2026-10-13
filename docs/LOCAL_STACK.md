@@ -50,6 +50,23 @@ downloaded on first use), which answers our questions zero-shot — expect
 lower accuracy than the fine-tuned weights until Laya is retrained on new
 taxonomies.
 
+## System 2: mock vs Ollama (local Gemma)
+
+System 2 defaults to `mock` (template reviewer). For the real model,
+locally — no cloud:
+
+```bash
+brew install --cask ollama
+ollama pull gemma3:4b
+SYSTEM2_BACKEND=ollama bash scripts/laya-stack.sh run
+```
+
+The router POSTs the review prompt to `http://localhost:11434` with
+temperature 0. If Ollama isn't running, System 2 fails safe (escalates to
+human) and `run` prints a warning. `GEMMA_MODEL` overrides the model name
+(Ollama names, e.g. `gemma3:4b` — not the HF name). `SYSTEM2_BACKEND=vertex`
+is the cloud alternative (needs `VERTEX_PROJECT` + `VERTEX_ENDPOINT_ID`).
+
 ## RLCD review + retraining (all local)
 
 Every query that falls to System 2 is logged to `feedback/fallbacks.jsonl`

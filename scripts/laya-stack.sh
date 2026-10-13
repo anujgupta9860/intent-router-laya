@@ -17,7 +17,9 @@
 # Knobs (env): LAYA_BASE, ROUTER_PORT, ANALYZER_PORT, ORDER_PORT,
 #              ANALYZER_CHECKPOINT_GCS, PYTHON_BIN, SYSTEM1_BACKEND
 #              (mock| laya — laya uses the fine-tuned checkpoint if
-#              downloaded, else the base HF checkpoint)
+#              downloaded, else the base HF checkpoint), SYSTEM2_BACKEND
+#              (mock | ollama — local Gemma | vertex — cloud Gemma),
+#              GEMMA_MODEL (ollama name, e.g. gemma3:4b)
 #
 set -euo pipefail
 
@@ -476,11 +478,28 @@ cmd_run() {
     info "System 1: $s1_backend (set SYSTEM1_BACKEND=laya for the real model)"
   fi
 
+  # System 2 backend: mock (default), ollama (local Gemma), vertex (cloud).
+  # Ollama uses Ollama model names (gemma3:4b), not the HF name.
+  local s2_backend="${SYSTEM2_BACKEND:-mock}"
+  local gemma_model="${GEMMA_MODEL:-gemma-3-4b-it}"
+  if [ "$s2_backend" = "ollama" ]; then
+    gemma_model="${GEMMA_MODEL:-gemma3:4b}"
+    if ! curl -sf -o /dev/null --max-time 2 "http://localhost:11434/api/tags" 2>/dev/null; then
+      info "WARNING: SYSTEM2_BACKEND=ollama but Ollama is not reachable at http://localhost:11434 — install it (brew install --cask ollama), pull the model (ollama pull gemma3:4b), then restart. System 2 will escalate until then."
+    else
+      info "System 2: Ollama ($gemma_model)"
+    fi
+  else
+    info "System 2: $s2_backend (set SYSTEM2_BACKEND=ollama for local Gemma)"
+  fi
+
   start_svc router intent-router-laya "$ROUTER_PORT" \
     "ANALYZER_URL=$analyzer_url" \
     "ANALYZER_TIMEOUT_S=10" \
     "WORKER_AGENTS_JSON=$wmap" \
     "SYSTEM1_BACKEND=$s1_backend" \
+    "SYSTEM2_BACKEND=$s2_backend" \
+    "GEMMA_MODEL=$gemma_model" \
     "LAYA_CHECKPOINT=$s1_checkpoint"
 
   wait_for "http://localhost:$ROUTER_PORT/health" router 60
