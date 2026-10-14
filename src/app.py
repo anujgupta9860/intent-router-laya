@@ -12,6 +12,7 @@ System 2 defaults to a mock reviewer (or local Ollama Gemma).
 from __future__ import annotations
 
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from .a2a_client import A2AClient
 from .analyzer_client import AnalyzerClient
-from .config import Settings
+from .config import Settings, WORKERS_LOCAL
 from .feedback import FeedbackLogger, feedback_to_dataset
 from .gemma_client import GemmaReviewer
 from .hybrid import MORE_INPUT_REVIEW_THRESHOLD, HybridRouter, SystemOne
@@ -102,6 +103,7 @@ app = FastAPI(title="Intent Router (Hybrid: Laya S1 + Gemma S2)", version="0.1.0
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CHAT_INDEX = REPO_ROOT / "chat" / "index.html"
 REVIEW_INDEX = REPO_ROOT / "review" / "index.html"
+ONBOARD_INDEX = REPO_ROOT / "onboard" / "index.html"
 
 
 @app.get("/chat")
@@ -118,6 +120,145 @@ def review():
     if not REVIEW_INDEX.exists():
         raise HTTPException(status_code=404, detail="review UI not installed")
     return FileResponse(REVIEW_INDEX, media_type="text/html")
+
+
+@app.get("/onboard")
+def onboard():
+    """Browser UI to onboard a new A2A worker agent from its agent card."""
+    if not ONBOARD_INDEX.exists():
+        raise HTTPException(status_code=404, detail="onboard UI not installed")
+    return FileResponse(ONBOARD_INDEX, media_type="text/html")
+
+
+class OnboardFetchRequest(BaseModel):
+    agent_url: str = Field(min_length=1, max_length=500,
+                           description="Agent base URL, e.g. http://localhost:8083")
+
+
+class OnboardRegisterRequest(BaseModel):
+    intent: str = Field(min_length=1, max_length=64,
+                        description="Router intent name, e.g. refund_status")
+    agent_url: str = Field(min_length=1, max_length=500)
+
+
+def _fetch_agent_card(agent_url: str) -> dict:
+    """Fetch and minimally validate an A2A agent card."""
+    import httpx
+
+    base = agent_url.strip().rstrip("/")
+    if not (base.startswith("http://") or base.startswith("https://")):
+        raise HTTPException(status_code=400,
+                            detail="agent_url must start with http:// or https://")
+    url = base + "/.well-known/agent-card.json"
+    try:
+        resp = httpx.get(url, timeout=10.0)
+        resp.raise_for_status()
+        card = resp.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"could not fetch agent card from {url}: {exc}") from exc
+    if not isinstance(card, dict) or not card.get("name"):
+        raise HTTPException(status_code=502,
+                            detail="agent card is not a valid JSON object "
+                                   "with a 'name' field")
+    return card
+
+
+def _card_summary(card: dict) -> dict:
+    skills = card.get("skills") or []
+    return {
+        "name": card.get("name"),
+        "description": card.get("description", ""),
+        "version": card.get("version", ""),
+        "skills": [{"name": s.get("name"), "description": s.get("description", "")}
+                   for s in skills if isinstance(s, dict) and s.get("name")],
+        "warnings": [
+            w for w in [
+                None if skills else "card lists no skills",
+                None if (card.get("endpoints", {}).get("message")
+                         or (card.get("protocols", {}).get("a2a") or {}).get("message"))
+                else "card has no /message endpoint — the router dispatches to {url}/message",
+            ] if w
+        ],
+    }
+
+
+@app.post("/onboard/fetch")
+def onboard_fetch(req: OnboardFetchRequest):
+    """Fetch an agent's A2A card for preview before registering."""
+    card = _fetch_agent_card(req.agent_url)
+    summary = _card_summary(card)
+    return {"ok": True, "agent_url": req.agent_url.strip().rstrip("/"),
+            "card": summary}
+
+
+_INTENT_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+
+
+@app.post("/onboard/register")
+def onboard_register(req: OnboardRegisterRequest):
+    """Register a new worker agent: intent -> agent URL.
+
+    Validates the agent card, persists the mapping to
+    data/workers.local.json (picked up on restart), hot-updates the
+    live router, and refreshes the skill registry so the agent's skills
+    appear in GET /skills immediately.
+    """
+    import json
+
+    intent = req.intent.strip()
+    if not _INTENT_RE.match(intent):
+        raise HTTPException(
+            status_code=400,
+            detail="intent must be lowercase letters/digits/underscores, "
+                   "e.g. refund_status")
+    agent_url = req.agent_url.strip().rstrip("/")
+    card = _fetch_agent_card(agent_url)
+    summary = _card_summary(card)
+
+    settings = _state.get("settings")
+    if settings is None:
+        raise HTTPException(status_code=503,
+                            detail="router not initialized")
+    # Live update: HybridRouter holds this same dict object, so routing
+    # picks up the new intent immediately (no restart needed).
+    settings.worker_agents[intent] = agent_url
+    # Persist for restarts (config merges this file over the env map).
+    try:
+        WORKERS_LOCAL.parent.mkdir(parents=True, exist_ok=True)
+        current = {}
+        if WORKERS_LOCAL.exists():
+            current = json.loads(WORKERS_LOCAL.read_text(encoding="utf-8"))
+            if not isinstance(current, dict):
+                current = {}
+        current[intent] = agent_url
+        WORKERS_LOCAL.write_text(json.dumps(current, indent=2) + "\n",
+                                 encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"could not persist workers.local.json: {exc}") from exc
+    # Skill registry: learn the new agent's card now.
+    catalog = _skills().register_agent(agent_url)
+    new_skills = [s for s in catalog.get("skills", [])
+                  if s.get("agent_url") == agent_url]
+    return {
+        "ok": True,
+        "intent": intent,
+        "agent_url": agent_url,
+        "agent": summary["name"],
+        "skills_registered": [s["skill"] for s in new_skills],
+        "warnings": summary["warnings"],
+        "next_steps": [
+            "Teach routing: add '" + intent + "' + example queries to "
+            "data/intents.yaml, then run: bash scripts/laya-stack.sh train laya",
+            "Teach Tier-2: in the Studio Training Data tab "
+            "(http://localhost:8081/studio) create the agent spec, Save, Build, "
+            "then run: bash scripts/laya-stack.sh train analyzer",
+            "Restart the stack so the registration survives reboots "
+            "(it is already live in this process).",
+        ],
+    }
 
 # CORS for the Studio (served from the analyzer domain) calling the
 # skill registry directly.

@@ -11,6 +11,12 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
+
+# Repo root (src/ lives one level down). workers.local.json written by the
+# /onboard UI lives in data/ next to intents.yaml.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+WORKERS_LOCAL = REPO_ROOT / "data" / "workers.local.json"
 
 
 def _get(name: str, default: str) -> str:
@@ -97,16 +103,29 @@ class Settings:
     def _load_worker_agents(cls) -> dict[str, str]:
         raw = os.environ.get("WORKER_AGENTS_JSON", "").strip()
         if not raw:
-            return dict(cls.DEFAULT_WORKERS)
+            data = dict(cls.DEFAULT_WORKERS)
+        else:
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"WORKER_AGENTS_JSON is not valid JSON: {exc}") from exc
+            if not isinstance(data, dict) or not data:
+                raise ValueError(
+                    "WORKER_AGENTS_JSON must be a non-empty JSON object mapping intent -> agent URL"
+                )
+            data = {str(k): str(v) for k, v in data.items()}
+        # Local onboardings (written by the /onboard UI) win over the env map
+        # so a newly registered agent takes effect without editing env vars.
         try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"WORKER_AGENTS_JSON is not valid JSON: {exc}") from exc
-        if not isinstance(data, dict) or not data:
-            raise ValueError(
-                "WORKER_AGENTS_JSON must be a non-empty JSON object mapping intent -> agent URL"
-            )
-        return {str(k): str(v) for k, v in data.items()}
+            if WORKERS_LOCAL.exists():
+                local = json.loads(WORKERS_LOCAL.read_text(encoding="utf-8"))
+                if isinstance(local, dict):
+                    for k, v in local.items():
+                        if isinstance(k, str) and isinstance(v, str) and v.strip():
+                            data[k] = v.strip()
+        except (json.JSONDecodeError, OSError):
+            pass  # a corrupt local file must never break startup
+        return data
 
     def worker_url(self, intent: str) -> str:
         """Resolve the A2A agent URL for an intent, falling back gracefully."""

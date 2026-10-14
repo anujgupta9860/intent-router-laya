@@ -57,6 +57,20 @@ class SkillRegistry:
         self._discover()
         return self.catalog()
 
+    def register_agent(self, url: str) -> dict:
+        """Add a worker agent URL (from the /onboard UI) and discover now.
+
+        The URL joins the registry's agent list; the card is fetched
+        immediately so the new skills show up in the catalog without
+        waiting for the TTL. Returns the refreshed catalog.
+        """
+        base = url.rstrip("/")
+        with self._lock:
+            if base not in self.agent_urls:
+                self.agent_urls.append(base)
+                self.agent_urls.sort()
+        return self.refresh()
+
     def find_skill(self, name: str) -> dict | None:
         self._ensure_fresh()
         with self._lock:

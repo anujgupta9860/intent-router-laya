@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Onboard Agent</title>
+<style>
+  body { background:#0f172a; color:#e2e8f0; font-family:system-ui, sans-serif; margin:0; padding:24px; max-width:860px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:#94a3b8; font-size:13px; margin-bottom:20px; }
+  .card { background:#1e293b; border-radius:10px; padding:16px; margin-bottom:16px; }
+  .card h2 { margin:0 0 10px; font-size:15px; }
+  .step { display:inline-block; background:#334155; border-radius:50%; width:22px; height:22px; text-align:center; line-height:22px; font-size:12px; margin-right:8px; }
+  label { display:block; font-size:12px; color:#94a3b8; margin:8px 0 4px; }
+  input[type=text], textarea { width:100%; box-sizing:border-box; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:6px; padding:8px 10px; font-size:13px; font-family:inherit; }
+  textarea { min-height:90px; font-family:monospace; }
+  .row { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  button { border:0; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:13px; font-weight:600; }
+  .primary { background:#2563eb; color:#fff; }
+  .secondary { background:#334155; color:#e2e8f0; }
+  .go { background:#16a34a; color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  .err { color:#fca5a5; font-size:13px; margin-top:8px; }
+  .ok { color:#86efac; font-size:13px; margin-top:8px; }
+  .kv { font-size:13px; line-height:1.8; }
+  .kv b { color:#cbd5e1; }
+  table { width:100%; border-collapse:collapse; font-size:13px; margin-top:8px; }
+  th { text-align:left; color:#94a3b8; font-weight:600; padding:6px 8px; border-bottom:1px solid #334155; }
+  td { padding:6px 8px; border-bottom:1px solid #1e293b; vertical-align:top; }
+  code { background:#0f172a; padding:2px 6px; border-radius:4px; font-size:12px; }
+  .warn { color:#fcd34d; font-size:13px; }
+  .next li { font-size:13px; margin:6px 0; line-height:1.5; }
+  .hidden { display:none; }
+  .hint { font-size:12px; color:#64748b; margin-top:4px; }
+</style>
+</head>
+<body>
+<h1>Onboard a worker agent</h1>
+<div class="sub">Point the router at a running A2A agent via its agent card. Registration is live immediately and persisted across restarts.</div>
+
+<div class="card">
+  <h2><span class="step">1</span>Find the agent</h2>
+  <label>Agent base URL (must be reachable from this machine)</label>
+  <input type="text" id="agentUrl" placeholder="http://localhost:8083">
+  <div class="row">
+    <button class="primary" id="fetchBtn" onclick="fetchCard()">Fetch card</button>
+  </div>
+  <label>…or paste the agent card JSON directly</label>
+  <textarea id="cardJson" placeholder='{"name": "my-agent", "skills": [...]}'></textarea>
+  <div class="row">
+    <button class="secondary" onclick="usePastedCard()">Use pasted card</button>
+  </div>
+  <div id="fetchMsg"></div>
+</div>
+
+<div class="card hidden" id="previewCard">
+  <h2><span class="step">2</span>Review the card</h2>
+  <div class="kv" id="cardKv"></div>
+  <table id="skillsTable"><thead><tr><th>Skill</th><th>Description</th></tr></thead><tbody></tbody></table>
+  <div id="cardWarn"></div>
+  <label>Intent name for routing (lowercase, underscores)</label>
+  <input type="text" id="intentName" placeholder="refund_status">
+  <div class="hint">System 1 will learn to route this intent to your agent after you add examples to <code>data/intents.yaml</code> and retrain.</div>
+  <div class="row">
+    <button class="go" id="registerBtn" onclick="register()">Register agent</button>
+  </div>
+  <div id="registerMsg"></div>
+</div>
+
+<div class="card hidden" id="doneCard">
+  <h2><span class="step">3</span>Next steps</h2>
+  <div class="ok" id="doneMsg"></div>
+  <ol class="next" id="nextSteps"></ol>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let pendingCard = null;   // card summary from /onboard/fetch or pasted
+let pendingUrl = null;
+
+function showMsg(el, text, cls) {
+  el.innerHTML = text ? `<div class="${cls}">${text}</div>` : '';
+}
+
+async function fetchCard() {
+  const url = $('#agentUrl').value.trim();
+  showMsg($('#fetchMsg'), '', '');
+  if (!url) { showMsg($('#fetchMsg'), 'Enter the agent base URL first.', 'err'); return; }
+  $('#fetchBtn').disabled = true;
+  try {
+    const r = await fetch('/onboard/fetch', {
+      method: 'POST', headers: {'content-type': 'application/json'},
+      body: JSON.stringify({agent_url: url}),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || 'fetch failed');
+    pendingCard = data.card; pendingUrl = data.agent_url;
+    renderPreview();
+    showMsg($('#fetchMsg'), 'Card fetched.', 'ok');
+  } catch (e) {
+    showMsg($('#fetchMsg'), 'Error: ' + e.message, 'err');
+  } finally { $('#fetchBtn').disabled = false; }
+}
+
+function usePastedCard() {
+  showMsg($('#fetchMsg'), '', '');
+  let card;
+  try { card = JSON.parse($('#cardJson').value); }
+  catch (e) { showMsg($('#fetchMsg'), 'Invalid JSON: ' + e.message, 'err'); return; }
+  if (!card || !card.name) { showMsg($('#fetchMsg'), 'Card needs at least a "name" field.', 'err'); return; }
+  const skills = Array.isArray(card.skills) ? card.skills.filter(s => s && s.name) : [];
+  pendingCard = {
+    name: card.name, description: card.description || '', version: card.version || '',
+    skills: skills.map(s => ({name: s.name, description: s.description || ''})),
+    warnings: skills.length ? [] : ['card lists no skills'],
+  };
+  pendingUrl = ($('#agentUrl').value.trim().replace(/\/$/, '')) || null;
+  if (!pendingUrl) { showMsg($('#fetchMsg'), 'Pasted card OK — but also enter the agent base URL so the router knows where to send traffic.', 'err'); return; }
+  renderPreview();
+}
+
+function renderPreview() {
+  const c = pendingCard;
+  $('#cardKv').innerHTML =
+    `<b>name:</b> <code>${c.name}</code><br>` +
+    (c.description ? `<b>description:</b> ${c.description}<br>` : '') +
+    (c.version ? `<b>version:</b> ${c.version}<br>` : '') +
+    `<b>url:</b> <code>${pendingUrl}</code>`;
+  $('#skillsTable tbody').innerHTML = c.skills.length
+    ? c.skills.map(s => `<tr><td><code>${s.name}</code></td><td>${s.description || ''}</td></tr>`).join('')
+    : '<tr><td colspan="2" style="color:#94a3b8">no skills listed</td></tr>';
+  $('#cardWarn').innerHTML = (c.warnings || []).map(w => `<div class="warn">⚠ ${w}</div>`).join('');
+  // suggest an intent name from the agent name
+  const sug = c.name.toLowerCase().replace(/-agent$/, '').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (!$('#intentName').value) $('#intentName').value = sug || '';
+  $('#previewCard').classList.remove('hidden');
+  $('#previewCard').scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+async function register() {
+  const intent = $('#intentName').value.trim();
+  showMsg($('#registerMsg'), '', '');
+  if (!/^[a-z][a-z0-9_]{1,63}$/.test(intent)) {
+    showMsg($('#registerMsg'), 'Intent must be lowercase letters/digits/underscores, e.g. refund_status.', 'err');
+    return;
+  }
+  $('#registerBtn').disabled = true;
+  try {
+    const r = await fetch('/onboard/register', {
+      method: 'POST', headers: {'content-type': 'application/json'},
+      body: JSON.stringify({intent, agent_url: pendingUrl}),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || 'registration failed');
+    const skills = (data.skills_registered || []).map(s => `<code>${s}</code>`).join(', ') || 'none';
+    $('#doneMsg').innerHTML =
+      `✓ <b>${data.agent}</b> registered — intent <code>${data.intent}</code> → <code>${data.agent_url}</code><br>` +
+      `Skills now in the router catalog: ${skills}` +
+      (data.warnings && data.warnings.length ? '<br>' + data.warnings.map(w => `<span class="warn">⚠ ${w}</span>`).join('<br>') : '');
+    $('#nextSteps').innerHTML = (data.next_steps || []).map(s => `<li>${s}</li>`).join('');
+    $('#doneCard').classList.remove('hidden');
+    $('#doneCard').scrollIntoView({behavior: 'smooth', block: 'start'});
+  } catch (e) {
+    showMsg($('#registerMsg'), 'Error: ' + e.message, 'err');
+  } finally { $('#registerBtn').disabled = false; }
+}
+</script>
+</body>
+</html>
